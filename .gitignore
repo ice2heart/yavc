@@ -1,0 +1,7 @@
+*.webm
+*.tvid
+build/
+videos/
+build-dos/
+build-probe/
+distr/
