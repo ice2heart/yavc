@@ -169,6 +169,16 @@ EncoderConfig parse_args(int argc, char **argv) {
         else if (a == "--compress") cfg.compress = true;
         else if (a == "--stats") cfg.stats = true;
         else if (a == "--split") { cfg.split = true; cfg.compress = true; }
+        else if (a == "--seg") {
+            // Bare `--seg` (no following number, or end of args) means the default
+            // segment size; `--seg N` overrides it. Peek so a trailing `--seg` works.
+            if (i + 1 < argc && argv[i + 1][0] != '-' &&
+                argv[i + 1][std::strspn(argv[i + 1], "0123456789")] == '\0')
+                cfg.seg = std::atoi(argv[++i]);
+            else
+                cfg.seg = TVID_SEG_DEFAULT;
+            cfg.split = true; cfg.compress = true;
+        }
         else if (a == "--audio-pcm") cfg.audio_pcm_path = next();
         else if (a == "--audio-rate") cfg.audio_rate = std::atoi(next());
         else enc_die(("unknown arg: " + a).c_str());
@@ -181,6 +191,7 @@ EncoderConfig parse_args(int argc, char **argv) {
     if (cfg.stable < 0 || cfg.block_stable < 0 || cfg.lambda < 0)
         enc_die("knobs must be >= 0");
     if (cfg.lookahead < 0 || cfg.shift < 0) enc_die("knobs must be >= 0");
+    if (cfg.seg < 0 || cfg.seg > 65535) enc_die("--seg out of range (0..65535)");
     if (cfg.shift > TVID_SHIFT_MAX) cfg.shift = TVID_SHIFT_MAX;
     if (!cfg.audio_pcm_path.empty() && (cfg.audio_rate < 1 || cfg.audio_rate > 65535))
         enc_die("--audio-rate out of range (1..65535)");
@@ -299,6 +310,21 @@ void pass2_encode(const EncoderConfig &cfg, EncoderState &st) {
 
     long cell_pos = (long)st.cell_plane.size();   // split: decoder's cell cursor mirror
     long color_pos = (long)st.color_plane.size(); // split: decoder's color cursor mirror
+
+    // v4 segmentation: seed each plane's per-frame offset table with the post-
+    // keyframe lengths (frame 0). Each entry f records the plane length *after*
+    // frame f's bytes are appended; off[0] is the length after the keyframe (which
+    // is in cell/raster/color, zero in the structure/mode/pal planes). Only
+    // recorded for the split path; the v3 writer ignores them.
+    if (cfg.split && cfg.seg > 0) {
+        st.off_struct.push_back(st.struct_stream.size());
+        st.off_nomode.push_back(st.struct_nomode.size());
+        st.off_cell.push_back(st.cell_plane.size());
+        st.off_mode.push_back(st.mode_plane.size());
+        st.off_raster.push_back(st.raster_plane.size());
+        st.off_pal.push_back(st.pal_plane.size());
+        st.off_color.push_back(st.color_plane.size());
+    }
     // Decoder-side color framebuffer for the round-trip (persists like `shown`).
     // Seeded from the keyframe hues so a SKIP cell on frame 1 holds the right color.
     std::vector<uint8_t> shown_color;
@@ -382,6 +408,15 @@ void pass2_encode(const EncoderConfig &cfg, EncoderState &st) {
             st.probe_nolen_3plane.insert(st.probe_nolen_3plane.end(), sbits_nm.begin(), sbits_nm.end());
 #endif
             st.framing_bytes += 2;
+            if (cfg.seg > 0) {
+                st.off_struct.push_back(st.struct_stream.size());
+                st.off_nomode.push_back(st.struct_nomode.size());
+                st.off_cell.push_back(st.cell_plane.size());
+                st.off_mode.push_back(st.mode_plane.size());
+                st.off_raster.push_back(st.raster_plane.size());
+                st.off_pal.push_back(st.pal_plane.size());
+                st.off_color.push_back(st.color_plane.size());
+            }
             continue;
         }
 
@@ -533,7 +568,7 @@ void write_split_output(const EncoderConfig &cfg, EncoderState &st) {
     std::vector<uint8_t> header;
     header.push_back(TVID_MAGIC0); header.push_back(TVID_MAGIC1);
     header.push_back(TVID_MAGIC2); header.push_back(TVID_MAGIC3);
-    header.push_back(TVID_VERSION);
+    header.push_back(TVID_VERSION_V3); // non-segmented whole-plane body
     {
         uint8_t hflags = TVID_FLAG_SPLIT;
         if (use_modeplane) hflags |= TVID_FLAG_MODEPLANE;
@@ -608,6 +643,178 @@ void write_split_output(const EncoderConfig &cfg, EncoderState &st) {
     (void)ncells;
 }
 
+// --- v4 segmented split body: the same planes as write_split_output, but each is
+//     sliced by segment (seg_frames frames per segment) and the chunks are emitted
+//     segment-major, so the player only ever holds one segment of each plane
+//     resident (see doc/v3-streaming.md). The whole-movie layout decisions
+//     (MODEPLANE / MODERLE / CELLSPLIT) are still made once and carried in the
+//     header flags; only the framing changes. This first cut emits segment 0 as a
+//     keyframe segment and every later segment as a CARRY segment (fb persists,
+//     cursors reset) -- byte-exact streaming with no re-encode. ---
+void write_split_segmented_output(const EncoderConfig &cfg, EncoderState &st) {
+    const int ncells = cfg.cols * cfg.rows;
+    const uint32_t nframes = (uint32_t)st.targets.size();
+    const uint32_t seg_frames = (uint32_t)cfg.seg;
+
+    // Map a frame span [fa, fb) to a plane's byte span, then entropy-code that
+    // slice into `out`. The offset tables follow the convention off[f] = cumulative
+    // plane length *through* frame f (frame 0 = keyframe), so the byte span for
+    // frames fa..fb-1 is [ (fa==0 ? 0 : off[fa-1]) .. off[fb-1] ). fb <= nframes, so
+    // off[fb-1] is always in range (max index nframes-1).
+    auto byte_lo = [](const std::vector<size_t> &off, uint32_t fa) -> size_t {
+        return fa == 0 ? 0 : off[fa - 1];
+    };
+    auto append_slice = [](std::vector<uint8_t> &out, const std::vector<uint8_t> &plane,
+                           size_t lo, size_t hi) {
+        std::vector<uint8_t> slice(plane.begin() + (long)lo, plane.begin() + (long)hi);
+        append_plane(out, slice);
+    };
+
+    // Whole-movie auto-select, exactly as write_split_output: structure 2-plane vs
+    // 3-plane, mode plain vs RLE, cell combined vs cell-split. Decide globally so
+    // the header carries one set of flags; each segment then emits the chosen
+    // variant's slice. (Per-segment auto-select would need per-segment flags; keep
+    // it simple and let the entropy coder reset per segment do the adapting.)
+    std::vector<uint8_t> b2; append_plane(b2, st.struct_stream);
+    std::vector<uint8_t> mode_rle(st.mode_plane.size() * 2 + 1);
+    mode_rle.resize((size_t)mode_rle_encode(
+        st.mode_plane.data(), (long)st.mode_plane.size(), mode_rle.data()));
+    std::vector<uint8_t> mbp, mbr;
+    append_plane(mbp, st.mode_plane);
+    append_plane(mbr, mode_rle);
+    bool use_moderle = mbr.size() < mbp.size();
+    std::vector<uint8_t> b3; append_plane(b3, st.struct_nomode);
+    if (use_moderle) b3.insert(b3.end(), mbr.begin(), mbr.end());
+    else             b3.insert(b3.end(), mbp.begin(), mbp.end());
+    bool use_modeplane = b3.size() < b2.size();
+    std::vector<uint8_t> c1; append_plane(c1, st.cell_plane);
+    std::vector<uint8_t> c2; append_plane(c2, st.raster_plane); append_plane(c2, st.pal_plane);
+    bool use_cellsplit = c2.size() < c1.size();
+
+    // Pick the structure plane + its offset table, and the cell plane(s) + tables.
+    const std::vector<uint8_t> &struct_plane = use_modeplane ? st.struct_nomode : st.struct_stream;
+    const std::vector<size_t>  &off_struct   = use_modeplane ? st.off_nomode   : st.off_struct;
+
+    const uint32_t nseg = (nframes + seg_frames - 1) / seg_frames;
+
+#ifdef TVID_PROBE
+    // probe[seg-kf]: with per-segment keyframes (segmentation makes keyframes go
+    // from once-per-movie to potentially once-per-segment) keyframe-cell
+    // compression matters more. The keyframe is `ncells` raster-order cell bytes
+    // (the first ncells of cell_plane / raster_plane). Measure whether a spatial
+    // intra predictor on those bytes beats plain entropy THROUGH THE REAL CODER:
+    // left = cur - left-neighbor, up = cur - up-neighbor (raster wrap), residual
+    // mod 256. doc/abandoned-levers.md found PER-LEAF raw prediction dead (residuals
+    // broke LZ matches); this re-measures it at WHOLE-KEYFRAME scope, which is the
+    // open question. Negative Δ would justify a per-keyframe predictor method; we
+    // ship plain until then. (Today the encoder emits CARRY for all later segments,
+    // so this is the segment-0 keyframe -- representative of any future one.)
+    if ((int)st.cell_plane.size() >= ncells) {
+        std::vector<uint8_t> kf(st.cell_plane.begin(), st.cell_plane.begin() + ncells);
+        std::vector<uint8_t> left(ncells), up(ncells);
+        for (int i = 0; i < ncells; ++i) {
+            int col = i % cfg.cols;
+            uint8_t lp = (col == 0) ? 0 : kf[i - 1];          // left neighbor (0 at row start)
+            uint8_t up_p = (i < cfg.cols) ? 0 : kf[i - cfg.cols]; // up neighbor (0 on first row)
+            left[i] = (uint8_t)(kf[i] - lp);
+            up[i]   = (uint8_t)(kf[i] - up_p);
+        }
+        std::vector<uint8_t> plain_b, left_b, up_b;
+        append_plane(plain_b, kf);
+        append_plane(left_b,  left);
+        append_plane(up_b,    up);
+        std::fprintf(stderr,
+            "probe[seg-kf]: ncells=%d  plain=%zu  left=%zu (Δ %+zd)  up=%zu (Δ %+zd)\n",
+            ncells, plain_b.size(),
+            left_b.size(), (ssize_t)left_b.size() - (ssize_t)plain_b.size(),
+            up_b.size(),   (ssize_t)up_b.size()   - (ssize_t)plain_b.size());
+    }
+#endif
+
+    std::vector<uint8_t> body;
+    for (uint32_t s = 0; s < nseg; ++s) {
+        const uint32_t fa = s * seg_frames;
+        const uint32_t fb = (fa + seg_frames < nframes) ? fa + seg_frames : nframes;
+
+        // Structure chunk: a leading keyframe-vs-carry byte, then the frame slice.
+        // Segment 0 is keyframe-led (its cell/color slice carries the keyframe);
+        // later segments carry forward the previous segment's framebuffer.
+        std::vector<uint8_t> sframed;
+        sframed.push_back(s == 0 ? (uint8_t)TVID_SEG_KEY : (uint8_t)TVID_SEG_CARRY);
+        sframed.insert(sframed.end(),
+                       struct_plane.begin() + (long)byte_lo(off_struct, fa),
+                       struct_plane.begin() + (long)off_struct[fb - 1]);
+        append_plane(body, sframed);
+
+        if (use_modeplane) {
+            if (use_moderle) {
+                // RLE is whole-plane; re-encode just this segment's mode slice.
+                std::vector<uint8_t> mslice(st.mode_plane.begin() + (long)byte_lo(st.off_mode, fa),
+                                            st.mode_plane.begin() + (long)st.off_mode[fb - 1]);
+                std::vector<uint8_t> mr(mslice.size() * 2 + 1);
+                mr.resize((size_t)mode_rle_encode(mslice.data(), (long)mslice.size(), mr.data()));
+                append_plane(body, mr);
+            } else {
+                append_slice(body, st.mode_plane, byte_lo(st.off_mode, fa), st.off_mode[fb - 1]);
+            }
+        }
+        if (use_cellsplit) {
+            append_slice(body, st.raster_plane, byte_lo(st.off_raster, fa), st.off_raster[fb - 1]);
+            append_slice(body, st.pal_plane,    byte_lo(st.off_pal, fa),    st.off_pal[fb - 1]);
+        } else {
+            append_slice(body, st.cell_plane, byte_lo(st.off_cell, fa), st.off_cell[fb - 1]);
+        }
+        if (cfg.color)
+            append_slice(body, st.color_plane, byte_lo(st.off_color, fa), st.off_color[fb - 1]);
+    }
+
+    std::vector<uint8_t> header;
+    header.push_back(TVID_MAGIC0); header.push_back(TVID_MAGIC1);
+    header.push_back(TVID_MAGIC2); header.push_back(TVID_MAGIC3);
+    header.push_back(TVID_VERSION); // 4
+    {
+        uint8_t hflags = TVID_FLAG_SPLIT;
+        if (use_modeplane) hflags |= TVID_FLAG_MODEPLANE;
+        if (use_modeplane && use_moderle) hflags |= TVID_FLAG_MODERLE;
+        if (use_cellsplit) hflags |= TVID_FLAG_CELLSPLIT;
+        if (cfg.shift > 0) hflags |= TVID_FLAG_SHIFT;
+        if (cfg.has_audio) hflags |= TVID_FLAG_AUDIO;
+        if (cfg.color) hflags |= TVID_FLAG_COLOR;
+        header.push_back(hflags);
+    }
+    header.push_back((uint8_t)cfg.cols);
+    header.push_back((uint8_t)cfg.rows);
+    header.push_back((uint8_t)cfg.fps);
+    put_u32le(header, nframes);
+    put_u16le(header, (uint16_t)seg_frames); // v4 field, right after frame_count
+    {
+        const char *ramp = TVID_HEADER_RAMP;
+        uint8_t ramp_len = (uint8_t)TVID_HEADER_RAMP_LEN;
+        header.push_back(ramp_len);
+        for (uint8_t i = 0; i < ramp_len; ++i) header.push_back((uint8_t)ramp[i]);
+    }
+    if (cfg.has_audio)
+        put_audio_subheader(header, cfg.audio_rate, st.audio_samples,
+                            (long)st.audio_blob.size());
+
+    FILE *fp = std::fopen(cfg.out_path.c_str(), "wb");
+    if (!fp) enc_die("cannot open output file");
+    std::fwrite(header.data(), 1, header.size(), fp);
+    std::fwrite(body.data(), 1, body.size(), fp);
+    if (cfg.has_audio) std::fwrite(st.audio_blob.data(), 1, st.audio_blob.size(), fp);
+    std::fclose(fp);
+
+    size_t total = header.size() + body.size();
+    std::fprintf(stderr,
+        "encoder: %u frames @ %d fps, %dx%d -> %zu bytes (%.1f KB), %.0f B/frame "
+        "[SPLIT/SEG=%u nseg=%u%s%s%s]\n",
+        nframes, cfg.fps, cfg.cols, cfg.rows, total, total / 1024.0,
+        (double)total / nframes, seg_frames, nseg,
+        use_modeplane ? (use_moderle ? "+MODE/RLE" : "+MODE") : "",
+        use_cellsplit ? "+CELL" : "", cfg.color ? "+COLOR" : "");
+    (void)ncells;
+}
+
 // --- optional whole-stream entropy back-end (orthogonal to the block coder).
 //     Try both LZSS and LZSS+Huffman; keep whichever is smaller (and only if it
 //     beats storing raw). Each prepends a u32le raw_len so the decoder can size
@@ -646,7 +853,7 @@ void write_interleaved_output(const EncoderConfig &cfg, EncoderState &st) {
     header.push_back(TVID_MAGIC1);
     header.push_back(TVID_MAGIC2);
     header.push_back(TVID_MAGIC3);
-    header.push_back(TVID_VERSION);
+    header.push_back(TVID_VERSION_V3); // whole-stream interleaved body
     {
         uint8_t hflags = 0;
         if (used_lzss) hflags |= TVID_FLAG_LZSS;

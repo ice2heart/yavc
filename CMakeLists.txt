@@ -122,6 +122,11 @@ add_executable(encode_decode_test
 target_include_directories(encode_decode_test PRIVATE src/encoder)
 add_test(NAME encode_decode COMMAND encode_decode_test)
 
+# v4 segmentation: pins the offset-table -> per-segment byte-slice math used by
+# write_split_segmented_output (the off-by-one that drops/dupes boundary bytes).
+add_executable(segment_test tests/segment_test.cpp)
+add_test(NAME segment_slicing COMMAND segment_test)
+
 if(TVID_PROBE)
   target_compile_definitions(encoder PRIVATE TVID_PROBE)
   target_compile_definitions(player PRIVATE TVID_PROBE)

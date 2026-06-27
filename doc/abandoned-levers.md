@@ -88,6 +88,26 @@ so `v − left` carries/borrows across the field boundary and produces high-entr
 Subtraction is the wrong operator for the byte. This was the third "decorrelate before entropy"
 lever to die on the cell plane. *Still measurable behind `-DTVID_PROBE` as `probe[raw-predict]`.*
 
+## Whole-keyframe intra prediction (v4 segmentation)
+
+**What:** v4 segmentation can place a fresh keyframe at each segment boundary (vs once per
+movie), so keyframe-cell bytes ship more often and their compression matters more. The open
+question the per-leaf result above did *not* settle: does a left/up spatial predictor over the
+**whole** `cols×rows` keyframe raster (not per-leaf) beat plain entropy? More context per
+predictor could in principle help where the tiny per-leaf windows could not.
+
+**Measured (through the real range coder, `probe[seg-kf]`):** still strictly worse. Smooth
+synthetic gradient — plain 246 B vs left 305 (+59) / up 310 (+64). Textured+noise — plain 917 B
+vs left 1161 (+244) / up 1330 (+413). The deficit *widens* with content complexity.
+
+**Why dropped:** the same two reasons as the per-leaf case carry over at full-frame scope — the
+keyframe is a raster of packed categorical `[luma|glyph]` bytes, not a scalar field, so
+`cur − neighbor` carries/borrows across the field boundary into high-entropy noise, and the
+residual destroys the cross-cell runs the range coder feeds on. Wider prediction context does not
+rescue an operator that is wrong for the byte. v4 ships **plain entropy** for keyframes (the
+format already auto-selects methods 0–3 per chunk, range coder included). *Still measurable behind
+`-DTVID_PROBE` as `probe[seg-kf]` in `write_split_segmented_output`.*
+
 ## Glyph-as-shape template matching (single-color)
 
 **What:** pick the glyph whose ink pattern best matches the cell's sub-pixel luminance gradient,

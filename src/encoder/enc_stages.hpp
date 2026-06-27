@@ -24,6 +24,7 @@ struct EncoderConfig {
     bool compress = false;
     bool stats = false;       // --stats: structure-vs-literal byte accounting
     bool split = false;       // --split: per-plane entropy-coded body
+    int  seg = 0;             // --seg N: v4 segmented split body (0 = v3 whole-plane)
     bool color = false;       // --color: add the xterm-256 color plane
     std::string out_path;
     std::string audio_pcm_path; // raw s16le mono PCM to embed
@@ -49,6 +50,13 @@ struct EncoderState {
     std::vector<uint8_t> raster_plane;  // cell-split: keyframe + RAW-leaf cells
     std::vector<uint8_t> pal_plane;     // cell-split: SOLID + PAL2 palette cells
     std::vector<uint8_t> color_plane;   // color: keyframe hues then leaf hues
+    // v4 segmentation: cumulative byte length of each plane after each frame, so a
+    // segment's slice of a plane is [off[seg_start] .. off[seg_end]). off[0]=0;
+    // off has frame_count+1 entries (entry f = length after frame f's data is
+    // appended). Filled in pass2 alongside the plane accumulators above; unused
+    // for v3 (cfg.seg == 0).
+    std::vector<size_t> off_struct, off_nomode, off_cell, off_mode;
+    std::vector<size_t> off_raster, off_pal, off_color;
     long framing_bytes = 0;
     BlockStats bstats;
 
@@ -71,6 +79,7 @@ void pass1a_read_frames(const EncoderConfig &cfg, EncoderState &st);
 void pass1b_hysteresis(const EncoderConfig &cfg, EncoderState &st);
 void pass2_encode(const EncoderConfig &cfg, EncoderState &st);
 void write_split_output(const EncoderConfig &cfg, EncoderState &st);
+void write_split_segmented_output(const EncoderConfig &cfg, EncoderState &st);
 void write_interleaved_output(const EncoderConfig &cfg, EncoderState &st);
 
 #endif // ENC_STAGES_HPP

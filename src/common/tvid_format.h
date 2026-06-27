@@ -28,8 +28,26 @@ extern "C" {
 #define TVID_MAGIC1 'V'
 #define TVID_MAGIC2 'I'
 #define TVID_MAGIC3 'D'
-#define TVID_VERSION 3      /* the only format: luma+glyph cell, optional color plane */
+#define TVID_VERSION 4      /* current format: v3 codec, but the SPLIT body is segmented
+                             * (streamable) and the header carries [u16 seg_frames] */
+#define TVID_VERSION_V3 3   /* whole-resident SPLIT body; still decoded unchanged */
 #define TVID_VERSION_V2 2   /* retired flat-color model; rejected on read, never written */
+
+/* Segmentation (v4). A v4 SPLIT body emits each plane as a sequence of per-segment
+ * chunks (segment-major: structure, [mode], cell(/raster+palette), [color] for
+ * segment 0, then again for segment 1, ...), each chunk in the same on-disk shape
+ * as a v3 whole-plane chunk. The player only holds the current segment of every
+ * plane resident, so the resident set is bounded by seg_frames x planes instead of
+ * the whole movie (see doc/v3-streaming.md). seg_frames is stored in the header
+ * (present only when version >= 4) so the encoder can trade RAM vs ratio.
+ *
+ * Each segment after segment 0 begins with a keyframe-vs-carry byte at the front
+ * of its structure chunk (see TVID_SEG_KEY/TVID_SEG_CARRY): a keyframe segment is
+ * independently decodable (its cell/color chunk starts with cols*rows keyframe
+ * bytes), a carry segment continues from the previous segment's framebuffer. */
+#define TVID_SEG_DEFAULT 64 /* frames per segment unless the encoder overrides it */
+#define TVID_SEG_CARRY 0    /* segment continues from the previous fb (no keyframe) */
+#define TVID_SEG_KEY   1    /* segment starts with a fresh keyframe (independently decodable) */
 
 /* Grid is fixed at 80x24 cells for the floppy target, but stored in the header
  * so the decoder never hardcodes it. */
@@ -186,6 +204,8 @@ typedef struct {
     uint8_t  rows;
     uint8_t  fps;
     uint32_t frame_count;
+    uint16_t seg_frames; /* (v4 only) frames per segment; 0 for v3. On the wire it
+                          * follows frame_count when version >= 4. */
     uint8_t  ramp_len;
     char     ramp[64]; /* ASCII glyph ramp, dark->light; ramp_len entries used */
     /* Audio sub-header (valid only when flags & TVID_FLAG_AUDIO). */

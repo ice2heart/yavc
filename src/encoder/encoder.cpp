@@ -38,7 +38,8 @@ int main(int argc, char **argv) {
     pass1b_hysteresis(cfg, st);
     pass2_encode(cfg, st);
 
-    if (cfg.split) write_split_output(cfg, st);
-    else           write_interleaved_output(cfg, st);
+    if (cfg.split && cfg.seg > 0) write_split_segmented_output(cfg, st);
+    else if (cfg.split)           write_split_output(cfg, st);
+    else                          write_interleaved_output(cfg, st);
     return 0;
 }
