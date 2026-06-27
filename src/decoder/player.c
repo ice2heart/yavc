@@ -283,7 +283,22 @@ typedef struct {
     uint8_t *colorp;  long color_len;  long color_pos;
     int is_key;       /* segment starts with a fresh keyframe (vs CARRY) */
     int color_failed; /* color chunk present but couldn't be held (grayscale) */
+    int step;         /* prefetch state machine cursor (SEG_STEP_*); LOADED when done */
 } plane_seg;
+
+/* Per-plane prefetch steps, in body order. seg_load_step does exactly one of
+ * these per call so the work of pulling a segment off disk can be spread one
+ * plane per frame instead of stalling the whole boundary frame (see the
+ * double-buffered prefetch in the v4 SPLIT loop). The mode/pal/color steps are
+ * skipped when their flag is off; the machine advances to SEG_STEP_LOADED. */
+enum {
+    SEG_STEP_STRUCT = 0,
+    SEG_STEP_MODE,
+    SEG_STEP_CELL,
+    SEG_STEP_PAL,
+    SEG_STEP_COLOR,
+    SEG_STEP_LOADED
+};
 
 static void seg_free(plane_seg *s) {
     free(s->structp); free(s->modep); free(s->cellp);
@@ -295,36 +310,80 @@ static void seg_free(plane_seg *s) {
  * structure chunks carry a leading keyframe/carry byte; v3 has none (treated as
  * KEY). `want_color` is the color-active flag; on a failed color allocation the
  * chunk is still consumed and color_failed is set. */
+/* Reset a holder to "empty, about to load segment 0 of its steps". */
+static void seg_load_begin(plane_seg *s) {
+    memset(s, 0, sizeof(*s));
+    s->is_key = 1;
+    s->step = SEG_STEP_STRUCT;
+}
+
+/* Advance the prefetch state machine by ONE plane (one read_plane + decompress).
+ * Skips inactive planes and stops at SEG_STEP_LOADED. Returns 1 once the whole
+ * segment is resident, 0 while more steps remain. Each call reads at most one
+ * chunk from fp, so calling it once per frame spreads a segment's I/O+decompress
+ * across the preceding segment's frames instead of one boundary-frame stall. */
+static int seg_load_step(plane_seg *s, FILE *fp, const tvid_header *h,
+                         int segmented, int want_color) {
+    switch (s->step) {
+    case SEG_STEP_STRUCT:
+        s->structp = read_plane(fp, &s->struct_len);
+        if (segmented) {
+            if (s->struct_len < 1) die("v4 structure segment missing keyframe byte");
+            s->is_key = (s->structp[0] == TVID_SEG_KEY);
+            /* Drop the leading flag byte so sp indexing matches the v3 layout. */
+            memmove(s->structp, s->structp + 1, (size_t)(s->struct_len - 1));
+            s->struct_len -= 1;
+        }
+        s->step = SEG_STEP_MODE;
+        return 0;
+    case SEG_STEP_MODE:
+        if (h->flags & TVID_FLAG_MODEPLANE) {
+            s->modep = read_plane(fp, &s->mode_len);
+            if (h->flags & TVID_FLAG_MODERLE) {
+                long exp_len = mode_rle_decoded_len(s->modep, s->mode_len);
+                if (exp_len < 0) die("malformed mode RLE plane");
+                uint8_t *exp = (uint8_t *)malloc(exp_len ? exp_len : 1);
+                if (!exp) die("out of memory");
+                if (mode_rle_decode(s->modep, s->mode_len, exp) != exp_len)
+                    die("malformed mode RLE plane");
+                free(s->modep); s->modep = exp; s->mode_len = exp_len;
+            }
+            s->step = SEG_STEP_CELL;
+            return 0;
+        }
+        s->step = SEG_STEP_CELL;
+        /* fall through: no separate frame spent on an absent mode plane */
+    case SEG_STEP_CELL:
+        s->cellp = read_plane(fp, &s->cell_len);
+        s->step = SEG_STEP_PAL;
+        return 0;
+    case SEG_STEP_PAL:
+        if (h->flags & TVID_FLAG_CELLSPLIT) {
+            s->palp = read_plane(fp, &s->pal_len);
+            s->step = SEG_STEP_COLOR;
+            return 0;
+        }
+        s->step = SEG_STEP_COLOR;
+        /* fall through */
+    case SEG_STEP_COLOR:
+        if (want_color) {
+            s->colorp = read_plane_opt(fp, &s->color_len);
+            if (!s->colorp) s->color_failed = 1; /* consumed but unheld: grayscale */
+        }
+        s->step = SEG_STEP_LOADED;
+        return 1;
+    default:
+        return 1;
+    }
+}
+
+/* Synchronous full load: drain the step machine. Used for segment 0 (must be
+ * resident before the first present) and for v3 (whole movie in one segment). */
 static void seg_load(plane_seg *s, FILE *fp, const tvid_header *h,
                      int segmented, int want_color) {
-    memset(s, 0, sizeof(*s));
-    s->structp = read_plane(fp, &s->struct_len);
-    s->is_key = 1;
-    if (segmented) {
-        if (s->struct_len < 1) die("v4 structure segment missing keyframe byte");
-        s->is_key = (s->structp[0] == TVID_SEG_KEY);
-        /* Drop the leading flag byte so sp indexing matches the v3 layout. */
-        memmove(s->structp, s->structp + 1, (size_t)(s->struct_len - 1));
-        s->struct_len -= 1;
-    }
-    if (h->flags & TVID_FLAG_MODEPLANE) {
-        s->modep = read_plane(fp, &s->mode_len);
-        if (h->flags & TVID_FLAG_MODERLE) {
-            long exp_len = mode_rle_decoded_len(s->modep, s->mode_len);
-            if (exp_len < 0) die("malformed mode RLE plane");
-            uint8_t *exp = (uint8_t *)malloc(exp_len ? exp_len : 1);
-            if (!exp) die("out of memory");
-            if (mode_rle_decode(s->modep, s->mode_len, exp) != exp_len)
-                die("malformed mode RLE plane");
-            free(s->modep); s->modep = exp; s->mode_len = exp_len;
-        }
-    }
-    s->cellp = read_plane(fp, &s->cell_len);
-    if (h->flags & TVID_FLAG_CELLSPLIT) s->palp = read_plane(fp, &s->pal_len);
-    if (want_color) {
-        s->colorp = read_plane_opt(fp, &s->color_len);
-        if (!s->colorp) s->color_failed = 1; /* consumed but unheld: grayscale */
-    }
+    seg_load_begin(s);
+    while (!seg_load_step(s, fp, h, segmented, want_color))
+        ;
 }
 
 int main(int argc, char **argv) {
@@ -447,18 +506,52 @@ int main(int argc, char **argv) {
         backend_present(fb, colfb);
         sync_wait(&at, 1, h.fps);
 
+        /* v4 prefetch: pull the NEXT segment off disk one plane per frame during
+         * the current segment, so the boundary is a pointer swap instead of a
+         * full read+decompress stall in a single frame slot. fp sits at the start
+         * of segment 1 here (audio_load restored the cursor). `next_ready` flips
+         * when seg_load_step finishes; `next_started` guards beginning a load only
+         * when there is another segment left to read. */
+        const uint32_t nsegments = segmented
+            ? (h.frame_count + seg_frames - 1) / seg_frames : 1;
+        plane_seg next;
+        seg_load_begin(&next);
+        int next_started = 0, next_ready = 0;
+        uint32_t prefetch_seg = 1; /* index of the segment `next` is loading */
+        if (segmented && nsegments > 1) { next_started = 1; }
+
         for (uint32_t f = 1; f < h.frame_count; ++f) {
             PROF_DECL(pt);
             PROF_CAP(f);
             if (backend_poll_quit()) break;
+            /* Prefetch one plane of the next segment this frame (amortizes the
+             * boundary I/O+decompress across the segment instead of stalling one
+             * frame). Cheap no-op once the next segment is fully resident. */
+            if (next_started && !next_ready)
+                next_ready = seg_load_step(&next, fp, &h, segmented,
+                                           has_color_play);
             /* v4 segment boundary: free the old segment, load the next, reset the
              * plane cursors. A KEY segment re-seeds fb/colfb from its keyframe; a
              * CARRY segment continues from the persisted fb/colfb. */
             if (segmented && f % seg_frames == 0) {
+                /* Finish the prefetch if it hasn't completed (tiny segments leave
+                 * too few frames to spread it); then swap next -> seg. */
+                if (next_started)
+                    while (!next_ready)
+                        next_ready = seg_load_step(&next, fp, &h, segmented,
+                                                   has_color_play);
                 seg_free(&seg);
-                seg_load(&seg, fp, &h, segmented, has_color_play);
+                seg = next;            /* pointer swap: no read/decompress here */
                 if (has_color_play && seg.color_failed)
                     die("v4 color segment unexpectedly unheld");
+                /* Begin prefetching the following segment, if any. */
+                prefetch_seg++;
+                if (prefetch_seg < nsegments) {
+                    seg_load_begin(&next);
+                    next_started = 1; next_ready = 0;
+                } else {
+                    next_started = 0; next_ready = 1;
+                }
                 if (seg.is_key) {
                     if (seg.cell_len < ncells) die("v4 keyframe segment too short");
                     memcpy(fb, seg.cellp, (size_t)ncells);
@@ -506,6 +599,7 @@ int main(int argc, char **argv) {
         audio_free(&at);
         if (fp) fclose(fp);
         seg_free(&seg);
+        seg_free(&next);   /* may hold a partially-prefetched segment */
         free(colfb);
         free(fb); free(tok); free(prevfb);
         return 0;
