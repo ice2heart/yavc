@@ -11,6 +11,16 @@ extern "C" {
 #include "tvid_format.h"
 }
 
+#if defined(TVID_VIZ)
+// Codec-visualizer capture (host-only, behind TVID_VIZ; see viz_trace.hpp). The
+// serializer walk below appends one VizLeaf per emitted leaf to g_viz_capture, so
+// the picture is the exact tree that produced the bytestream -- no recomputation,
+// no drift. The visualizer points g_viz_capture at the current frame's leaf
+// vector before the canonical split encode and nulls it after, so the nomode /
+// raster passes (which run with it null) capture nothing.
+#include "viz_trace.hpp"
+#endif
+
 #ifdef TVID_PROBE
 // Per-leaf cell-byte decorrelation probe. The RAW serializer appends, for every
 // RAW leaf, that leaf's cells under several predictors, so encoder.cpp can run
@@ -461,6 +471,11 @@ struct Tree {
                         std::vector<uint8_t> *modeplane,
                         int idx, int x, int y, int s, BlockStats *st) const {
         const Node &n = pool[idx];
+#if defined(TVID_VIZ)
+        // Bit offset at this node's boundary, before its split flag, so a leaf's
+        // captured structure bits include its own terminal split=0 flag.
+        const long viz_node_bit0 = g_viz_capture ? (pr.w->byte * 8L + pr.w->bit) : 0;
+#endif
         if (s > 1) { bw_bit(pr.w, n.split ? 1 : 0); if (st) st->split_bits++; }
         if (n.split) {
             int half = s >> 1;
@@ -471,6 +486,18 @@ struct Tree {
             return;
         }
         const LeafChoice &lf = n.leaf;
+#if defined(TVID_VIZ)
+        // Snapshot the plane cursors *before* this leaf so the exact bytes/bits it
+        // writes can be sliced out afterward (the leaf's wire representation). The
+        // structure-bit start is the node boundary (includes the split=0 flag).
+        const long viz_bit0 = viz_node_bit0;
+        const size_t viz_cell0 = (g_viz_capture && pr.cellplane)
+            ? pr.cellplane->size() : 0;
+        const size_t viz_pal0 = (g_viz_capture && pr.palplane)
+            ? pr.palplane->size() : 0;
+        const size_t viz_color0 = (g_viz_capture && pr.colorplane)
+            ? pr.colorplane->size() : 0;
+#endif
         if (modeplane) modeplane->push_back((uint8_t)lf.mode);
         else bw_bits(pr.w, (uint32_t)lf.mode, TVID_MODE_BITS);
         if (st) st->mode_bits += TVID_MODE_BITS;
@@ -480,6 +507,37 @@ struct Tree {
         case TVID_MODE_RAW:   serialize_raw(c, pr, x, y, s, st); break;
         case TVID_MODE_PAL2:  serialize_pal2(c, pr, lf, x, y, s, st); break;
         }
+#if defined(TVID_VIZ)
+        if (g_viz_capture) {
+            VizLeaf vl;
+            vl.x = x; vl.y = y; vl.s = s;
+            vl.mode = (uint8_t)lf.mode; vl.rd = lf.rd;
+            vl.shift = lf.shift; vl.mvx = lf.mvx; vl.mvy = lf.mvy;
+            vl.solid = lf.solid; vl.pal0 = lf.pal0; vl.pal1 = lf.pal1;
+            // Structure bits this leaf wrote (mode tag + any shift/selector bits),
+            // read back from the bitwriter buffer MSB-first.
+            vl.struct_bit0 = viz_bit0;
+            const long bit1 = pr.w->byte * 8L + pr.w->bit;
+            for (long b = viz_bit0; b < bit1; ++b) {
+                int byte = (int)(b >> 3), off = (int)(b & 7);
+                int set = (pr.w->buf[byte] >> (7 - off)) & 1;
+                vl.struct_bits.push_back(set ? '1' : '0');
+            }
+            // Cell-plane bytes (RAW raster, or SOLID/PAL2 palette when not split
+            // into palplane) plus any palette plane bytes, in write order.
+            if (pr.cellplane)
+                vl.cell_bytes.assign(pr.cellplane->begin() + viz_cell0,
+                                     pr.cellplane->end());
+            if (pr.palplane)
+                vl.cell_bytes.insert(vl.cell_bytes.end(),
+                                     pr.palplane->begin() + viz_pal0,
+                                     pr.palplane->end());
+            if (pr.colorplane)
+                vl.color_bytes.assign(pr.colorplane->begin() + viz_color0,
+                                      pr.colorplane->end());
+            g_viz_capture->push_back(vl);
+        }
+#endif
     }
 };
 

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>termvideo codec visualizer</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <h1>YASVC codec visualizer</h1>
+  <div id="meta"></div>
+</header>
+
+<main>
+  <section id="stage-view">
+    <div id="canvas-wrap">
+      <canvas id="grid" width="800" height="480"></canvas>
+    </div>
+    <div id="controls">
+      <div class="row">
+        <button id="frame-first" title="first frame">&laquo;</button>
+        <button id="frame-prev" title="prev frame">&lsaquo;&lsaquo;</button>
+        <span id="frame-label" class="label">frame 0</span>
+        <button id="frame-next" title="next frame">&rsaquo;&rsaquo;</button>
+        <button id="frame-last" title="last frame">&raquo;</button>
+      </div>
+      <div class="row">
+        <input id="frame-slider" type="range" min="0" max="0" value="0">
+      </div>
+      <div class="row">
+        <button id="stage-prev" title="prev stage">&larr; stage</button>
+        <span id="stage-label" class="label">1/5 input/quantize</span>
+        <button id="stage-next" title="next stage">stage &rarr;</button>
+      </div>
+      <div class="row legend" id="legend"></div>
+    </div>
+  </section>
+
+  <aside id="panel">
+    <h2>Frame</h2>
+    <div id="frame-info"></div>
+    <h2>Stage</h2>
+    <div id="stage-info"></div>
+    <h2>Selected region</h2>
+    <div id="leaf-info">click a region</div>
+    <h2>Planes (whole clip)</h2>
+    <div id="plane-info"></div>
+  </aside>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

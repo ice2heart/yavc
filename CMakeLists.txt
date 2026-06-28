@@ -141,6 +141,47 @@ if(TVID_PROBE)
   target_compile_definitions(player PRIVATE TVID_PROBE)
 endif()
 
+# --- codec visualizer (host-only, opt-in: -DTVID_VIZ=ON) ---
+#
+# A web tool to step through what the codec does to a clip (quadtree regions,
+# per-leaf modes, plane/byte breakdown, decode reassembly). It drives the REAL
+# encode pipeline and captures the same Tree the serializer walks, behind a
+# TVID_VIZ compile guard (defined ONLY on this target, like TVID_PROBE above), so
+# the shipped encoder/player are byte-identical. The HTTP server is civetweb,
+# pulled at configure time via FetchContent (no vendored sources). Off by default
+# so a normal build never reaches the network; turn on with -DTVID_VIZ=ON.
+option(TVID_VIZ "Build the host-only codec visualizer (fetches civetweb)" OFF)
+if(TVID_VIZ)
+  include(FetchContent)
+  set(CIVETWEB_ENABLE_SSL OFF CACHE BOOL "" FORCE)
+  set(CIVETWEB_ENABLE_SSL_DYNAMIC_LOADING OFF CACHE BOOL "" FORCE)
+  set(CIVETWEB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(CIVETWEB_ENABLE_SERVER_EXECUTABLE OFF CACHE BOOL "" FORCE)
+  set(CIVETWEB_ENABLE_ASAN OFF CACHE BOOL "" FORCE)
+  set(CIVETWEB_INSTALL_EXECUTABLE OFF CACHE BOOL "" FORCE)
+  # civetweb v1.16's CMakeLists declares cmake_minimum_required(VERSION 3.1..),
+  # which modern CMake (>=4) rejects. Let the subproject configure under the old
+  # policy without touching our own (newer) minimum.
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+  FetchContent_Declare(civetweb
+    GIT_REPOSITORY https://github.com/civetweb/civetweb.git
+    GIT_TAG v1.16
+    GIT_SHALLOW TRUE)
+  FetchContent_MakeAvailable(civetweb)
+
+  add_executable(visualizer
+    src/visualizer/visualizer.cpp
+    src/encoder/viz_trace.cpp
+    src/encoder/enc_stages.cpp
+    src/encoder/quantize.cpp
+    src/encoder/blockcoder.cpp
+    ${TVID_COMMON_DEC}
+    ${TVID_ENC_CODEC})
+  target_include_directories(visualizer PRIVATE src/encoder src/common)
+  target_compile_definitions(visualizer PRIVATE TVID_VIZ)
+  target_link_libraries(visualizer civetweb-c-library)
+endif()
+
 # --- DOS player cross-build (opt-in: -DTVID_DOS=ON) ---
 #
 # Builds PLAYER.EXE, the 32-bit DOS/4GW player (text-mode video backend +

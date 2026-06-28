@@ -4,4 +4,5 @@ build/
 videos/
 build-dos/
 build-probe/
+build-viz/
 distr/
