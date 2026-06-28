@@ -39,6 +39,11 @@ static uint32_t read_u32le(FILE *fp) {
            ((uint32_t)b[3] << 24);
 }
 
+static uint32_t read_u32le_buf(const uint8_t *b) {
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) |
+           ((uint32_t)b[3] << 24);
+}
+
 static int read_u8(FILE *fp) {
     int c = fgetc(fp);
     if (c == EOF) die("unexpected EOF");
@@ -57,14 +62,22 @@ static int read_u8(FILE *fp) {
  * Sound Blaster path implements the same audio.h interface with auto-init DMA. */
 typedef struct {
     int active;        /* audio present and the backend opened */
+    int codec;         /* TVID_AUDIO_IMA_ADPCM (1) or ..._ENT (2) */
     int rate;          /* sample rate (Hz) */
     uint8_t *blob;     /* resident COMPRESSED ADPCM payload (the file tail) */
     long blob_len;     /* bytes in blob */
     long nsamples;     /* total samples the track will decode to */
-    long ip;           /* blob read cursor: byte offset of the next block */
+    long ip;           /* blob read cursor: byte offset of the next block/chunk */
     long decoded;      /* samples decoded+submitted so far (== submitted) */
     long submitted;    /* samples handed to audio_submit (== decoded) */
     int16_t *scratch;  /* one block of PCM, reused per decode (ADPCM_BLOCK_SAMPLES) */
+    /* Codec 2 only: the current entropy chunk decompressed to raw ADPCM block
+     * bytes. audio_decode_next_block walks blocks out of this group buffer and
+     * refills it from the next chunk when exhausted, so the per-block decode path
+     * below is shared with codec 1. NULL/empty for codec 1. */
+    uint8_t *grp;      /* decompressed raw ADPCM bytes for the current chunk group */
+    long grp_len;      /* valid bytes in grp */
+    long grp_pos;      /* byte cursor into grp (start of the next ADPCM block) */
 } audio_track;
 
 /* Read the audio tail into at->blob (kept COMPRESSED resident). fp may be
@@ -74,7 +87,9 @@ typedef struct {
 static int audio_load(audio_track *at, FILE *fp, const tvid_header *h) {
     memset(at, 0, sizeof(*at));
     if (!(h->flags & TVID_FLAG_AUDIO)) return 0;
-    if (h->audio_codec != TVID_AUDIO_IMA_ADPCM) return 0; /* unknown: skip audio */
+    if (h->audio_codec != TVID_AUDIO_IMA_ADPCM &&
+        h->audio_codec != TVID_AUDIO_IMA_ADPCM_ENT)
+        return 0; /* unknown codec: video still plays, just silent */
 
     long here = ftell(fp);
     if (fseek(fp, 0, SEEK_END) != 0) return 0;
@@ -92,10 +107,23 @@ static int audio_load(audio_track *at, FILE *fp, const tvid_header *h) {
     int16_t *scratch = (int16_t *)malloc((size_t)ADPCM_BLOCK_SAMPLES * sizeof(int16_t));
     if (!scratch) { free(blob); return 0; }
 
+    /* Codec 2: the tail is entropy chunks, each wrapping up to TVID_AUDIO_ENT_GROUP
+     * ADPCM blocks. Hold one decompressed group of raw ADPCM bytes; the per-block
+     * decode below then runs unchanged out of it. */
+    uint8_t *grp = NULL;
+    if (h->audio_codec == TVID_AUDIO_IMA_ADPCM_ENT) {
+        grp = (uint8_t *)malloc((size_t)TVID_AUDIO_ENT_GROUP * ADPCM_BLOCK_BYTES);
+        if (!grp) { free(scratch); free(blob); return 0; }
+    }
+
+    at->codec = h->audio_codec;
     at->blob = blob;
     at->blob_len = (long)h->audio_bytes;
     at->nsamples = (long)h->audio_samples;
     at->scratch = scratch;
+    at->grp = grp;
+    at->grp_len = 0;
+    at->grp_pos = 0;
     at->ip = 0;
     at->decoded = 0;
     at->submitted = 0;
@@ -105,18 +133,60 @@ static int audio_load(audio_track *at, FILE *fp, const tvid_header *h) {
     return 0;
 }
 
-/* Decode and submit the next ADPCM block, advancing the blob cursor. Returns the
+/* Codec 2: ensure the group buffer holds the next ADPCM block, refilling it from
+ * the next entropy chunk when exhausted. A chunk is [u8 method][u32le adpcm_len]
+ * [u32le payload_len][payload]; method 0 = stored raw, 3 = range-coded. We
+ * decompress it back to the EXACT raw ADPCM bytes, so the per-block decode below
+ * is identical to codec 1. Returns 0 on success, -1 at end / on malformed input. */
+static int audio_fill_group(audio_track *at) {
+    if (at->grp_pos < at->grp_len) return 0; /* current group still has blocks */
+    if (at->ip + 9 > at->blob_len) return -1;
+    int method = at->blob[at->ip];
+    long alen = (long)read_u32le_buf(at->blob + at->ip + 1);
+    long plen = (long)read_u32le_buf(at->blob + at->ip + 5);
+    long hdr = 9;
+    if (alen < 0 || plen < 0 || at->ip + hdr + plen > at->blob_len) return -1;
+    if (alen > (long)TVID_AUDIO_ENT_GROUP * ADPCM_BLOCK_BYTES) return -1;
+    const uint8_t *payload = at->blob + at->ip + hdr;
+    if (method == 0) {
+        if (plen != alen) return -1;
+        memcpy(at->grp, payload, (size_t)alen);
+    } else if (method == 3) {
+        if (range_decompress(payload, plen, at->grp, alen) != alen) return -1;
+    } else {
+        return -1; /* unknown chunk method */
+    }
+    at->ip += hdr + plen;
+    at->grp_len = alen;
+    at->grp_pos = 0;
+    return 0;
+}
+
+/* Decode and submit the next ADPCM block, advancing the read cursor. Returns the
  * number of samples submitted (0 at end of track or on a malformed/short block,
- * which also stops further decoding by leaving ip at the bad position). */
+ * which also stops further decoding by leaving the cursor at the bad position).
+ * Block bytes come from the raw tail (codec 1) or the decompressed entropy group
+ * (codec 2); the adpcm_decode_block call is identical for both. */
 static long audio_decode_next_block(audio_track *at) {
     if (at->decoded >= at->nsamples) return 0;
     long remain = at->nsamples - at->decoded;
     int n = remain > ADPCM_BLOCK_SAMPLES ? ADPCM_BLOCK_SAMPLES : (int)remain;
     long bb = adpcm_block_bytes(n);
-    if (bb < 0 || at->ip + bb > at->blob_len) { at->nsamples = at->decoded; return 0; }
-    int got = adpcm_decode_block(at->blob + at->ip, bb, at->scratch, n);
+    if (bb < 0) { at->nsamples = at->decoded; return 0; }
+
+    const uint8_t *blk;
+    if (at->codec == TVID_AUDIO_IMA_ADPCM_ENT) {
+        if (audio_fill_group(at) != 0) { at->nsamples = at->decoded; return 0; }
+        if (at->grp_pos + bb > at->grp_len) { at->nsamples = at->decoded; return 0; }
+        blk = at->grp + at->grp_pos;
+    } else {
+        if (at->ip + bb > at->blob_len) { at->nsamples = at->decoded; return 0; }
+        blk = at->blob + at->ip;
+    }
+    int got = adpcm_decode_block(blk, bb, at->scratch, n);
     if (got != n) { at->nsamples = at->decoded; return 0; } /* clamp track to what decoded */
-    at->ip += bb;
+    if (at->codec == TVID_AUDIO_IMA_ADPCM_ENT) at->grp_pos += bb;
+    else                                       at->ip += bb;
     audio_submit(at->scratch, n);
     at->decoded += n;
     at->submitted += n;
@@ -137,6 +207,38 @@ static void audio_pump(audio_track *at) {
         if (audio_decode_next_block(at) == 0) break; /* end of track */
     }
 }
+
+#ifdef TVID_PROBE
+/* Probe-only (TVID_DUMP_AUDIO=1): decode the whole track to raw s16le PCM on
+ * stdout via the real per-block path (codec 1 or 2) and exit, with no backend
+ * and no pacing. Lets the codec-1 and codec-2 versions of a clip be compared for
+ * byte-identical audio decode: cmp a.pcm b.pcm must be silent. Mirrors the video
+ * TVID_DUMP. */
+static void audio_dump_stdout(audio_track *at) {
+    long produced = 0;
+    while (produced < at->nsamples) {
+        long remain = at->nsamples - at->decoded;
+        int n = remain > ADPCM_BLOCK_SAMPLES ? ADPCM_BLOCK_SAMPLES : (int)remain;
+        long bb = adpcm_block_bytes(n);
+        const uint8_t *blk;
+        if (at->codec == TVID_AUDIO_IMA_ADPCM_ENT) {
+            if (audio_fill_group(at) != 0) break;
+            if (at->grp_pos + bb > at->grp_len) break;
+            blk = at->grp + at->grp_pos;
+        } else {
+            if (at->ip + bb > at->blob_len) break;
+            blk = at->blob + at->ip;
+        }
+        if (adpcm_decode_block(blk, bb, at->scratch, n) != n) break;
+        if (at->codec == TVID_AUDIO_IMA_ADPCM_ENT) at->grp_pos += bb;
+        else                                       at->ip += bb;
+        at->decoded += n;
+        fwrite(at->scratch, sizeof(int16_t), (size_t)n, stdout);
+        produced += n;
+    }
+    fflush(stdout);
+}
+#endif
 
 /* Pace to the audio clock when audio is active: block until the speaker has
  * played up to (frame_index / fps) seconds; otherwise fall back to the backend's
@@ -192,8 +294,10 @@ static void audio_free(audio_track *at) {
     if (at->active) { audio_finish(); audio_shutdown(); }
     free(at->blob);
     free(at->scratch);
+    free(at->grp);
     at->blob = NULL;
     at->scratch = NULL;
+    at->grp = NULL;
     at->active = 0;
 }
 
@@ -447,6 +551,21 @@ int main(int argc, char **argv) {
         h.audio_samples = read_u32le(fp);
         h.audio_bytes = read_u32le(fp);
     }
+
+#ifdef TVID_PROBE
+    /* Audio frame-dump: decode the whole track to raw s16le PCM on stdout and
+     * exit (no video, no backend pacing). Used to prove codec-2 audio decodes
+     * byte-identically to codec 1. */
+    if (getenv("TVID_DUMP_AUDIO")) {
+        audio_track dat;
+        audio_load(&dat, fp, &h);
+        if (dat.active) { audio_finish(); audio_shutdown(); dat.active = 0; }
+        audio_dump_stdout(&dat);
+        audio_free(&dat);
+        fclose(fp);
+        return 0;
+    }
+#endif
 
     const int ncells = h.cols * h.rows;
     uint8_t *fb = (uint8_t *)malloc((size_t)ncells);

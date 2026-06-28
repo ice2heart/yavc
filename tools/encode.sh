@@ -49,7 +49,13 @@
 #   --audio-rate N  audio sample rate in Hz (default 8000). The source's audio is
 #                   extracted to mono s16 PCM at this rate, IMA-ADPCM encoded
 #                   (~0.5 byte/sample), and embedded in the .tvid tail. ~8kHz mono
-#                   fits a 3-min song in well under a megabyte.
+#                   fits a 3-min song in well under a megabyte. Also the primary
+#                   *size* knob: audio is ~90% of file bytes and ADPCM size scales
+#                   linearly with rate (6000 ~= 64%, 4000 ~= 43% vs 8000), at a
+#                   quality cost. Lower it to fit an over-budget clip.
+#   --audio-entropy range-code the ADPCM nibbles (audio codec 2). Lossless vs the
+#                   default codec 1 (decoded PCM is bit-identical), ~10-12% off the
+#                   whole file, DOS-decodable. Forwarded verbatim to the encoder.
 #   --no-audio      do not embed audio (video only; the previous behavior). Also
 #                   used automatically when the source has no audio track.
 set -euo pipefail

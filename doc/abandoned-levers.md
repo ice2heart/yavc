@@ -149,6 +149,30 @@ the quadtree walk).
 is full) / 16-bit flags, and the saving doesn't justify the format churn. *Still measurable behind
 `-DTVID_PROBE` as `probe[nolen]`.*
 
+## Lossless audio re-encode (Shorten/FLAC-style LPC + Rice)
+
+**What:** replace lossy IMA-ADPCM with a true lossless codec — fixed-order
+polynomial (LPC) prediction of the PCM, Rice/Golomb coding of the residuals (the
+classic DOS-era integer-only design, decodable under the asymmetry rule).
+
+**Measured (on the decoded PCM of vi/sat/bif):** fixed-order 1/2/3 LPC + per-block
+optimal-k Rice came out at **300–366% of the ADPCM size** — 3× *larger*.
+
+**Why dropped:** ADPCM is *lossy* (4 bits/sample); lossless 8 kHz speech/music
+needs ~12 bits/sample. Lossless is simply the wrong target when the goal is
+*smaller*. The win is to entropy-code the existing ADPCM nibbles (lossless w.r.t.
+the current audio) — shipped as audio codec 2, see [compression.md](compression.md).
+
+## Non-integer audio codecs (Opus / AAC / Vorbis)
+
+**What:** swap IMA-ADPCM for a modern perceptual codec — far smaller at equal
+quality.
+
+**Why dropped (not measured):** none decode integer-only in real-mode/DOS with
+two small tables; they need float/MDCT/large state. They violate the decoder
+asymmetry rule that governs the whole project (the decoder ships on the floppy
+and runs on a 1980s PC). Out of scope by construction, not by measurement.
+
 ## Higher-order / affine extensions (noted, not pursued)
 
 - **Range coder order-2** — regresses: 65 K contexts are far too sparse on a <1 MB plane (the same

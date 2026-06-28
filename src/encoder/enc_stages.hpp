@@ -13,6 +13,10 @@
 
 #include "blockcoder.hpp"
 
+extern "C" {
+#include "tvid_format.h"
+}
+
 // Parsed command-line knobs (immutable once parse_args returns).
 struct EncoderConfig {
     int fps = 10, cols = 0, rows = 0;
@@ -30,6 +34,8 @@ struct EncoderConfig {
     std::string audio_pcm_path; // raw s16le mono PCM to embed
     int audio_rate = 8000;
     bool has_audio = false;
+    bool audio_entropy = false; // --audio-entropy: range-code the ADPCM nibbles
+                                // (codec 2). Lossless vs codec 1, ~10-16% smaller.
 };
 
 // Big working buffers + accumulators, owned across the pipeline stages.
@@ -63,6 +69,7 @@ struct EncoderState {
     // audio (encoded up front so audio_bytes is known before the header).
     std::vector<uint8_t> audio_blob;
     long audio_samples = 0;
+    int  audio_codec = TVID_AUDIO_IMA_ADPCM; // 1 = raw ADPCM, 2 = entropy-coded
 
 #ifdef TVID_PROBE
     // Probe accumulators carried from pass 2 into the split-output writer.
@@ -75,6 +82,10 @@ struct EncoderState {
 [[noreturn]] void enc_die(const char *msg);
 EncoderConfig parse_args(int argc, char **argv);
 std::vector<uint8_t> encode_audio(const std::string &path, long *out_samples);
+std::vector<uint8_t> entropy_wrap_adpcm(const std::vector<uint8_t> &blob,
+                                        long samples);
+std::vector<uint8_t> entropy_wrap_adpcm_k(const std::vector<uint8_t> &blob,
+                                          long samples, int group);
 void pass1a_read_frames(const EncoderConfig &cfg, EncoderState &st);
 void pass1b_hysteresis(const EncoderConfig &cfg, EncoderState &st);
 void pass2_encode(const EncoderConfig &cfg, EncoderState &st);

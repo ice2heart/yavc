@@ -213,6 +213,50 @@ Probe the added cost with the `-DTVID_PROBE` build (`probe[color]:` line) — se
   file (bits expensive → SOLID/SKIP). `tools/encode.sh --fit-size` raises lambda to fit the budget,
   stepping fps 12→10→8 only as a last resort.
 
+## Audio entropy coding (`--audio-entropy`, codec 2)
+
+The audio tail is ~90% of a shipped file's bytes, and v3 audio was plain 4-bit
+IMA-ADPCM with **no entropy stage** (measured 4.01 bits/sample). `gzip`/`xz`
+recover ~10–16% from it — all the "zip headroom" the rest of the format had
+already squeezed out of the video planes (the video body compresses <1% further
+under xz). So the audio is where the only remaining slack lives.
+
+Two DOS-viable conclusions framed the design (both measured, see
+[abandoned-levers.md](abandoned-levers.md)): lossless re-encode of the PCM
+(Shorten/FLAC-style LPC + Rice) is **3× larger** than ADPCM (ADPCM's lossiness
+is doing the work), and non-integer codecs (Opus/AAC) violate the decoder
+asymmetry rule. The only lever left is to **entropy-code the existing ADPCM
+nibbles** — lossless w.r.t. the current audio, no quality change.
+
+`audio_codec == 2` (`TVID_AUDIO_IMA_ADPCM_ENT`) keeps the exact same ADPCM
+blocks but wraps each **group of `TVID_AUDIO_ENT_GROUP` (256) blocks** in a
+self-describing entropy chunk reusing the split-body plane shape
+(`[u8 method][u32le adpcm_len][u32le payload_len][payload]`, method 0 = stored,
+3 = range-coded via [range.c](../src/common/range_dec.c)). The decoder
+range-decodes a chunk back to the **exact** codec-1 ADPCM bytes, then runs the
+unchanged `adpcm_decode_block` — so decoded PCM is bit-identical to codec 1
+(no flag bit, no version bump; a codec-1-only player just plays silent).
+
+**Group size is a RAM-vs-ratio knee.** The adaptive coder needs a long warmup,
+so small groups pay a steep per-reset tax (probe sweep on vi/sat: K=4 → ~96%,
+K=64 → ~92%, K=256 → ~89%, K=1024 ≈ whole-stream ~87%). 256 blocks (~64 s @
+8 kHz) sits at the knee — within ~2% of the floor while bounding the
+decompressed group to 256 KB resident (vs the 2.8 MB whole-PCM the on-demand
+path exists to avoid) and giving a clean DOS DMA restart point every ~64 s.
+Realized whole-file win is **~10–12% of total bytes** on the mono clips (audio
+≈80–90% of them). Measure the knee on a clip with the `-DTVID_PROBE`
+`probe[adpcm-ent]:` line before changing `TVID_AUDIO_ENT_GROUP`.
+
+### Lossy audio size knob (`--audio-rate`)
+
+Orthogonal to codec 2: lowering the sample rate scales the ADPCM size linearly
+and is the *largest* audio lever, at a quality cost. `--audio-rate` is already
+plumbed end-to-end (ffmpeg `-ar` → sub-header). Estimated with entropy stacked:
+6 kHz ≈ 64% of audio, 4 kHz ≈ 43%. Ship default stays 8 kHz lossless; 6 kHz is
+the first size step for an over-budget clip. A 3-bit IMA variant
+(`audio_codec == 3`) would be the next lossy step but needs a new decode path —
+not built (gated on whether 6 kHz already covers the sweet spot).
+
 ## Shipped vs experimental
 
 | Lever | Status |
@@ -227,6 +271,8 @@ Probe the added cost with the `-DTVID_PROBE` build (`probe[color]:` line) — se
 | Entropy method 2 (LZSS+Huffman / no-LZ Huffman) | **shipped** |
 | **Entropy method 3 (adaptive order-1 range coder)** | **shipped** — the largest single win (−13.7% to −23.7% across inputs) |
 | Optional xterm-256 color plane | **shipped** |
+| Entropy-coded ADPCM audio (codec 2, `--audio-entropy`) | **shipped** (opt-in) — ~10–12% off total file bytes, lossless |
+| Lossy audio rate knob (`--audio-rate`) | **shipped** (encoder knob) |
 | Temporal hysteresis / lookahead / block-stable / lambda | **shipped** (encoder knobs) |
 | PAL4, field-split cells, order-1 *static* Huffman, glyph-as-shape, half-block sub-cell color, forward-reference frames, per-leaf cell predictor, drop-per-frame-length | **rejected** — see [abandoned-levers.md](abandoned-levers.md) |
 

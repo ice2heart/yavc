@@ -54,9 +54,9 @@ void put_u16le(std::vector<uint8_t> &v, uint16_t x) {
 // Append the audio sub-header (TVID_AUDIO_SUBHEADER_BYTES) to a file header, in
 // the same field order tvid_format.h documents. Call only when audio is present;
 // the caller has already set TVID_FLAG_AUDIO in the flags byte.
-void put_audio_subheader(std::vector<uint8_t> &header, int rate, long samples,
-                         long bytes) {
-    header.push_back(TVID_AUDIO_IMA_ADPCM); // codec
+void put_audio_subheader(std::vector<uint8_t> &header, int codec, int rate,
+                         long samples, long bytes) {
+    header.push_back((uint8_t)codec);       // 1 = raw ADPCM, 2 = entropy-coded
     header.push_back(1);                    // channels (mono)
     put_u16le(header, (uint16_t)rate);
     put_u32le(header, (uint32_t)samples);
@@ -144,6 +144,48 @@ std::vector<uint8_t> encode_audio(const std::string &path, long *out_samples) {
     return blob;
 }
 
+// Wrap a raw IMA-ADPCM blob (codec 1) into the entropy-coded tail (codec 2):
+// a sequence of self-describing chunks, one per group of TVID_AUDIO_ENT_GROUP
+// ADPCM blocks. Each chunk is [u8 method][u32le adpcm_len][u32le payload_len]
+// [payload], reusing the split-body plane-chunk shape: method 0 = the raw block
+// bytes stored, 3 = range-coded (range.h). The decoder range-decodes a chunk
+// back to the EXACT original ADPCM block bytes, so decoded PCM is bit-identical
+// to codec 1; grouping keeps DOS block-streaming restart points. `samples` is the
+// PCM sample count (to recover each block's coded-sample count -> byte length).
+std::vector<uint8_t> entropy_wrap_adpcm_k(const std::vector<uint8_t> &blob,
+                                          long samples, int group) {
+    std::vector<uint8_t> out;
+    size_t ip = 0;          // cursor into the raw ADPCM blob
+    long rem = samples;     // PCM samples still to account for
+    while (rem > 0 && ip < blob.size()) {
+        // Accumulate up to `group` whole blocks into one chunk.
+        size_t grp_start = ip;
+        for (int b = 0; b < group && rem > 0 && ip < blob.size(); ++b) {
+            int n = rem > ADPCM_BLOCK_SAMPLES ? ADPCM_BLOCK_SAMPLES : (int)rem;
+            long bb = adpcm_block_bytes(n);
+            if (bb < 0 || ip + (size_t)bb > blob.size()) enc_die("adpcm blob truncated");
+            ip += (size_t)bb;
+            rem -= n;
+        }
+        const uint8_t *src = blob.data() + grp_start;
+        long glen = (long)(ip - grp_start);
+        std::vector<uint8_t> rc(glen + glen / 16 + 1024);
+        long rcc = range_compress(src, glen, rc.data(), (long)rc.size());
+        int method = 0; long plen = glen; const uint8_t *psrc = src;
+        if (rcc > 0 && rcc < glen) { method = 3; plen = rcc; psrc = rc.data(); }
+        out.push_back((uint8_t)method);
+        put_u32le(out, (uint32_t)glen);
+        put_u32le(out, (uint32_t)plen);
+        out.insert(out.end(), psrc, psrc + plen);
+    }
+    return out;
+}
+
+std::vector<uint8_t> entropy_wrap_adpcm(const std::vector<uint8_t> &blob,
+                                        long samples) {
+    return entropy_wrap_adpcm_k(blob, samples, TVID_AUDIO_ENT_GROUP);
+}
+
 EncoderConfig parse_args(int argc, char **argv) {
     EncoderConfig cfg;
     cfg.cols = TVID_COLS;
@@ -181,6 +223,7 @@ EncoderConfig parse_args(int argc, char **argv) {
         }
         else if (a == "--audio-pcm") cfg.audio_pcm_path = next();
         else if (a == "--audio-rate") cfg.audio_rate = std::atoi(next());
+        else if (a == "--audio-entropy") cfg.audio_entropy = true;
         else enc_die(("unknown arg: " + a).c_str());
     }
     // The color plane lives only in the split body (per-plane auto-select); it has
@@ -590,7 +633,7 @@ void write_split_output(const EncoderConfig &cfg, EncoderState &st) {
         for (uint8_t i = 0; i < ramp_len; ++i) header.push_back((uint8_t)ramp[i]);
     }
     if (cfg.has_audio)
-        put_audio_subheader(header, cfg.audio_rate, st.audio_samples,
+        put_audio_subheader(header, st.audio_codec, cfg.audio_rate, st.audio_samples,
                             (long)st.audio_blob.size());
     FILE *fp = std::fopen(cfg.out_path.c_str(), "wb");
     if (!fp) enc_die("cannot open output file");
@@ -794,7 +837,7 @@ void write_split_segmented_output(const EncoderConfig &cfg, EncoderState &st) {
         for (uint8_t i = 0; i < ramp_len; ++i) header.push_back((uint8_t)ramp[i]);
     }
     if (cfg.has_audio)
-        put_audio_subheader(header, cfg.audio_rate, st.audio_samples,
+        put_audio_subheader(header, st.audio_codec, cfg.audio_rate, st.audio_samples,
                             (long)st.audio_blob.size());
 
     FILE *fp = std::fopen(cfg.out_path.c_str(), "wb");
@@ -871,7 +914,7 @@ void write_interleaved_output(const EncoderConfig &cfg, EncoderState &st) {
     header.push_back(ramp_len);
     for (uint8_t i = 0; i < ramp_len; ++i) header.push_back((uint8_t)ramp[i]);
     if (cfg.has_audio)
-        put_audio_subheader(header, cfg.audio_rate, st.audio_samples,
+        put_audio_subheader(header, st.audio_codec, cfg.audio_rate, st.audio_samples,
                             (long)st.audio_blob.size());
 
     FILE *fp = std::fopen(cfg.out_path.c_str(), "wb");

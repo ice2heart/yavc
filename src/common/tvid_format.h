@@ -185,15 +185,37 @@ extern "C" {
  * and a strict video-only player simply never reads past the body).
  *
  * Audio sub-header (little-endian), present iff TVID_FLAG_AUDIO:
- *   [u8  audio_codec]     1 = IMA ADPCM (TVID_AUDIO_IMA_ADPCM); only value today
+ *   [u8  audio_codec]     1 = IMA ADPCM (TVID_AUDIO_IMA_ADPCM)
+ *                         2 = entropy-coded IMA ADPCM (TVID_AUDIO_IMA_ADPCM_ENT)
  *   [u8  audio_channels]  1 = mono (only value today)
  *   [u16 audio_rate]      sample rate in Hz (e.g. 8000)
  *   [u32 audio_samples]   total PCM sample count (exact stream end + A/V sync)
- *   [u32 audio_bytes]     length of the ADPCM payload appended after the body
- * The ADPCM payload is a sequence of self-contained IMA blocks (see adpcm.h):
+ *   [u32 audio_bytes]     length of the audio payload appended after the body
+ *
+ * Codec 1: the payload is a sequence of self-contained IMA blocks (see adpcm.h):
  * the decoder can start at any block boundary, which the DOS auto-init DMA path
- * relies on. */
+ * relies on.
+ *
+ * Codec 2: same IMA blocks, but each block (or fixed group of blocks) is wrapped
+ * in a self-describing entropy chunk so the raw ADPCM nibbles - which carry no
+ * entropy stage of their own - are range-coded losslessly (~10-16% smaller; the
+ * audio tail is ~90% of file bytes). Chunk shape mirrors the split-body plane
+ * chunk: [u8 method][u32le adpcm_len][u32le payload_len][payload], method 0 =
+ * stored raw block bytes, 3 = range-coded (range.h). The decoder range-decodes a
+ * chunk back to the EXACT codec-1 ADPCM block bytes, then runs the unchanged
+ * adpcm_decode_block - so decoded PCM is bit-identical to codec 1. Per-chunk
+ * restart points preserve the DOS block-streaming / DMA self-heal property.
+ * A strict codec-1-only player rejects audio_codec 2 and plays silent. */
 #define TVID_AUDIO_IMA_ADPCM 1
+#define TVID_AUDIO_IMA_ADPCM_ENT 2
+/* ADPCM blocks grouped per entropy chunk under codec 2. The adaptive range coder
+ * needs a long warmup, so per-reset tax is steep at small group sizes (probe
+ * sweep on vi/sat: K=4 -> ~96%, K=64 -> ~92%, K=256 -> ~89%, K=1024 -> ~87% ==
+ * whole-stream). 256 blocks (~64 s @ 8 kHz) sits at the knee: within ~2% of the
+ * whole-stream floor while bounding the decompressed group to 256*1 KB = 256 KB
+ * resident -- far under the 2.8 MB whole-PCM the on-demand path exists to avoid,
+ * and a clean DOS restart point every ~64 s. */
+#define TVID_AUDIO_ENT_GROUP 256
 #define TVID_AUDIO_SUBHEADER_BYTES 12 /* 1+1+2+4+4 */
 
 /* On-disk header. Written/read field-by-field (no struct packing reliance). */

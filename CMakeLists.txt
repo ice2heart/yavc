@@ -99,6 +99,15 @@ add_executable(adpcm_test tests/adpcm_test.c src/common/adpcm_dec.c src/encoder/
 target_link_libraries(adpcm_test m)
 add_test(NAME adpcm_roundtrip COMMAND adpcm_test)
 
+# Codec-2 audio: ADPCM blocks wrapped in range-coded entropy chunks must
+# reconstruct the exact ADPCM bytes (lossless vs codec 1), across group restarts.
+add_executable(audio_entropy_test
+  tests/audio_entropy_test.c
+  src/common/adpcm_dec.c src/encoder/adpcm_enc.cpp
+  src/common/range_dec.c src/encoder/range_enc.cpp)
+target_link_libraries(audio_entropy_test m)
+add_test(NAME audio_entropy_roundtrip COMMAND audio_entropy_test)
+
 # Golden-byte test: pins the EXACT compressed output of each entropy method, so a
 # refactor that still round-trips but changes the bytestream is caught.
 add_executable(coder_golden_test

@@ -19,6 +19,13 @@
 
 #include <cstdio>
 
+#ifdef TVID_PROBE
+#include <vector>
+extern "C" {
+#include "range.h"
+}
+#endif
+
 int main(int argc, char **argv) {
     EncoderConfig cfg = parse_args(argc, argv);
     EncoderState st;
@@ -32,6 +39,42 @@ int main(int argc, char **argv) {
             "encoder: audio %ld samples @ %d Hz -> %zu B ADPCM (%.1f KB)\n",
             st.audio_samples, cfg.audio_rate, st.audio_blob.size(),
             st.audio_blob.size() / 1024.0);
+#ifdef TVID_PROBE
+        // probe[adpcm-ent]: measure the entropy-coded audio tail against the raw
+        // ADPCM blob (the only DOS-viable audio lever -- doc/abandoned-levers.md
+        // ruled out lossless LPC and non-integer codecs). Reports the shipped
+        // grouped size and the whole-stream range ceiling so the group knee
+        // (TVID_AUDIO_ENT_GROUP) is chosen from data. Measure-first per CLAUDE.md.
+        {
+            long raw = (long)st.audio_blob.size();
+            std::vector<uint8_t> whole(raw + raw / 16 + 1024);
+            long wc = range_compress(st.audio_blob.data(), raw, whole.data(),
+                                     (long)whole.size());
+            std::fprintf(stderr, "probe[adpcm-ent]: raw=%ld whole-stream=%ld (%.1f%%)\n",
+                raw, wc, wc > 0 ? 100.0 * wc / raw : 0.0);
+            /* Sweep group sizes K to find the knee: the per-group model reset taxes
+             * small K (the adaptive coder barely warms up). Pick the smallest K
+             * within ~1% of whole-stream that still bounds the decompressed group. */
+            for (int K : {1, 4, 16, 64, 256, 1024}) {
+                long sz = entropy_wrap_adpcm_k(st.audio_blob, st.audio_samples, K).size();
+                std::fprintf(stderr, "probe[adpcm-ent]:   K=%-4d grouped=%8ld (%.1f%%)\n",
+                    K, sz, 100.0 * sz / raw);
+            }
+        }
+#endif
+        // --audio-entropy: replace the raw ADPCM tail with the entropy-coded one
+        // (codec 2). Lossless vs codec 1; decoder range-decodes each chunk back to
+        // identical ADPCM bytes before adpcm_decode_block.
+        if (cfg.audio_entropy) {
+            std::vector<uint8_t> ent =
+                entropy_wrap_adpcm(st.audio_blob, st.audio_samples);
+            std::fprintf(stderr,
+                "encoder: audio entropy-coded %zu B -> %zu B (%.1f%%)\n",
+                st.audio_blob.size(), ent.size(),
+                100.0 * ent.size() / st.audio_blob.size());
+            st.audio_blob = std::move(ent);
+            st.audio_codec = TVID_AUDIO_IMA_ADPCM_ENT;
+        }
     }
 
     pass1a_read_frames(cfg, st);
