@@ -59,6 +59,12 @@ struct Ctx {
     long lambda;              // /256 fixed point
     long block_stable;        // SKIP distortion credit
     int  shift_range;         // motion search radius (0 = SHIFT off, no moved bit)
+    // EXPERIMENTAL split-coarsening levers (see blockcoder.hpp). 0 = no effect.
+    long split_bias = 0;      // per-split surcharge added to the "split" option
+    int  split_lookahead = 0; // # future frames that grant a stability credit
+    const uint8_t *const *future_sub = nullptr;
+    const uint8_t *const *future_ideal = nullptr;
+    int  future_n = 0;
 };
 
 // Distortion of cell value `cell` shown at grid cell (xx,yy): compare the cell's
@@ -403,12 +409,23 @@ struct Node {
 struct Tree {
     std::vector<Node> pool;
     long lambda = 0; // copied from Ctx so node_rd can price split bits
+    long split_bias = 0; // copied from Ctx so node_rd matches build's split cost
     int build(const Ctx &c, int x, int y, int s) {
         lambda = c.lambda;
+        split_bias = c.split_bias;
         int idx = (int)pool.size();
         pool.push_back(Node{});
         // Leaf option.
         LeafChoice leaf = eval_leaf(c, x, y, s);
+        // EXPERIMENTAL lookahead: if this leaf SKIPs and would keep SKIPping for
+        // the next N future frames, credit its cost so a temporally stable
+        // partition prefers staying whole (its structure plane then repeats and
+        // the range coder codes it near-free). No-op when split_lookahead == 0.
+        if (c.split_lookahead > 0 && leaf.mode == TVID_MODE_SKIP && !leaf.shift) {
+            long credit = future_skip_credit(c, x, y, s);
+            leaf.rd -= credit;
+            if (leaf.rd < 0) leaf.rd = 0;
+        }
         long split_bit = (s > 1) ? c.lambda : 0; // cost of the split flag bit
         long leaf_rd = leaf.rd + split_bit;  // a size>1 leaf still spends 1 bit
 
@@ -424,7 +441,7 @@ struct Tree {
         int k1 = build(c, x + half, y,        half);
         int k2 = build(c, x,        y + half, half);
         int k3 = build(c, x + half, y + half, half);
-        long split_rd = c.lambda // the split flag bit
+        long split_rd = c.lambda + c.split_bias // split flag bit + coarsening bias
             + node_rd(k0) + node_rd(k1) + node_rd(k2) + node_rd(k3);
 
         if (split_rd < leaf_rd) {
@@ -442,9 +459,34 @@ struct Tree {
     long node_rd(int idx) const {
         const Node &n = pool[idx];
         if (n.split)
-            return lambda + node_rd(n.kids[0]) + node_rd(n.kids[1])
+            return lambda + split_bias + node_rd(n.kids[0]) + node_rd(n.kids[1])
                           + node_rd(n.kids[2]) + node_rd(n.kids[3]);
         return n.leaf.rd; // already includes its own split bit if size>1
+    }
+    // EXPERIMENTAL lookahead credit (Lever B): distortion the leaf's *current*
+    // cells (c.prev) would accrue against each of the next N future frames if held
+    // in place. A future frame counts as "still SKIP" while its summed distortion
+    // stays under block_stable (the same threshold the SKIP credit uses); each such
+    // stable frame contributes that frame's slack (block_stable - dist) as a credit.
+    // A leaf that diverges in the future earns nothing past that point.
+    long future_skip_credit(const Ctx &c, int x, int y, int s) const {
+        long total = 0;
+        int n = c.split_lookahead < c.future_n ? c.split_lookahead : c.future_n;
+        for (int k = 0; k < n; ++k) {
+            const uint8_t *fsub = c.future_sub ? c.future_sub[k] : nullptr;
+            if (!fsub) break;
+            long dist = 0;
+            for (int yy = y; yy < y + s; ++yy)
+                for (int xx = x; xx < x + s; ++xx) {
+                    if (xx >= c.cols || yy >= c.rows) continue;
+                    dist += tvid_mono_byte_distortion(
+                        c.prev[yy * c.cols + xx],
+                        &fsub[((size_t)(yy * c.cols + xx)) * TVID_MONO_SUBN]);
+                }
+            if (dist >= c.block_stable) break; // diverges -> no further credit
+            total += c.block_stable - dist;
+        }
+        return total;
     }
     // Serialize the tree. `cellplane` non-null => split mode: cell bytes go there
     // (byte-aligned, contiguous across frames) instead of into the structure
@@ -553,6 +595,9 @@ std::vector<uint8_t> blockcoder_encode(const uint8_t *prev, const uint8_t *ideal
     c.cols = p.cols; c.rows = p.rows;
     c.lambda = p.lambda; c.block_stable = p.block_stable;
     c.shift_range = p.shift_range;
+    c.split_bias = p.split_bias; c.split_lookahead = p.split_lookahead;
+    c.future_sub = p.future_sub; c.future_ideal = p.future_ideal;
+    c.future_n = p.future_n;
 
     // Build a tree per superblock; concatenate into one bitstream.
     std::vector<uint8_t> out((size_t)p.cols * p.rows * 2 + 64);
@@ -587,6 +632,9 @@ std::vector<uint8_t> blockcoder_encode_split(const uint8_t *prev,
     c.cols = p.cols; c.rows = p.rows;
     c.lambda = p.lambda; c.block_stable = p.block_stable;
     c.shift_range = p.shift_range;
+    c.split_bias = p.split_bias; c.split_lookahead = p.split_lookahead;
+    c.future_sub = p.future_sub; c.future_ideal = p.future_ideal;
+    c.future_n = p.future_n;
 
     // Structure bits -> returned byte-aligned buffer; cell bytes -> appended to
     // the shared cellplane (contiguous across all frames). Same RD tree as the

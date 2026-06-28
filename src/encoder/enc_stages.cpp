@@ -205,6 +205,8 @@ EncoderConfig parse_args(int argc, char **argv) {
         else if (a == "--shift") cfg.shift = std::atoi(next());
         else if (a == "--block-stable") cfg.block_stable = std::atoi(next());
         else if (a == "--lambda") cfg.lambda = std::atoi(next());
+        else if (a == "--split-bias") cfg.split_bias = std::atoi(next());
+        else if (a == "--split-lookahead") cfg.split_lookahead = std::atoi(next());
         else if (a == "--mono") { /* v3 is always mono-shape; accepted for compat */ }
         else if (a == "--quant") { (void)next(); /* legacy v2 knob; ignored in v3 */ }
         else if (a == "--color") cfg.color = true;
@@ -234,6 +236,7 @@ EncoderConfig parse_args(int argc, char **argv) {
     if (cfg.stable < 0 || cfg.block_stable < 0 || cfg.lambda < 0)
         enc_die("knobs must be >= 0");
     if (cfg.lookahead < 0 || cfg.shift < 0) enc_die("knobs must be >= 0");
+    if (cfg.split_bias < 0 || cfg.split_lookahead < 0) enc_die("knobs must be >= 0");
     if (cfg.seg < 0 || cfg.seg > 65535) enc_die("--seg out of range (0..65535)");
     if (cfg.shift > TVID_SHIFT_MAX) cfg.shift = TVID_SHIFT_MAX;
     if (!cfg.audio_pcm_path.empty() && (cfg.audio_rate < 1 || cfg.audio_rate > 65535))
@@ -348,7 +351,9 @@ void pass2_encode(const EncoderConfig &cfg, EncoderState &st) {
     bp.lambda = cfg.lambda;
     bp.block_stable = (long)cfg.block_stable;
     bp.shift_range = cfg.shift;
-    // bp.sub is set per-frame to targets[f] below
+    bp.split_bias = (long)cfg.split_bias;       // EXPERIMENTAL coarsening lever A
+    bp.split_lookahead = cfg.split_lookahead;   // EXPERIMENTAL coarsening lever B
+    // bp.sub is set per-frame to targets[f] below; bp.future_* sliced per-frame too.
     const int caps = cfg.shift > 0 ? TVID_CAP_SHIFT : 0;
 
     long cell_pos = (long)st.cell_plane.size();   // split: decoder's cell cursor mirror
@@ -379,6 +384,17 @@ void pass2_encode(const EncoderConfig &cfg, EncoderState &st) {
         // The block coder scores cells against the per-cell sub-pixel luma block;
         // point bp.sub at this frame's blocks.
         bp.sub = st.targets[f].data();
+        // EXPERIMENTAL lookahead (lever B): hand the block coder pointers to the
+        // next split_lookahead frames' sub-pixel blocks so a leaf that would keep
+        // SKIPping ahead earns a stability credit. No-op when split_lookahead == 0.
+        std::vector<const uint8_t *> fut_sub;
+        if (cfg.split_lookahead > 0) {
+            for (int k = 1; k <= cfg.split_lookahead && f + (size_t)k < st.targets.size(); ++k)
+                fut_sub.push_back(st.targets[f + k].data());
+        }
+        bp.future_sub = fut_sub.empty() ? nullptr : fut_sub.data();
+        bp.future_ideal = nullptr; // credit scores current cells vs future sub only
+        bp.future_n = (int)fut_sub.size();
         const uint8_t *frame_color = cfg.color ? st.ctargets[f].data() : nullptr;
 
 #ifdef TVID_PROBE
@@ -526,6 +542,28 @@ void write_split_output(const EncoderConfig &cfg, EncoderState &st) {
     bool use_cellsplit = cell2_sz < cell1_sz;
 
 #ifdef TVID_PROBE
+    // Lever (split coarsening, --split-bias / --split-lookahead): bias the quadtree
+    // toward bigger leaves. The win, if any, is post-entropy: a coarser tree emits
+    // fewer split bits + mode tags, so the structure and mode planes compress
+    // smaller through the range coder. Report the *entropy-coded* structure/mode/
+    // cell plane sizes (the winning auto-select side) so a --split-bias sweep can be
+    // read against the --split-bias 0 baseline. The tree-shape counts (leaf totals,
+    // split bits) come from --stats; pass it to see *why* the planes moved.
+    {
+        const size_t struct_sz = use_modeplane ? body3_sz : body2_sz;
+        const size_t cell_sz   = use_cellsplit ? cell2_sz : cell1_sz;
+        long total_leaves = st.bstats.n_skip + st.bstats.n_solid
+                          + st.bstats.n_raw + st.bstats.n_pal2;
+        std::fprintf(stderr,
+            "probe[bigchunk]: split-bias=%d split-lookahead=%d  "
+            "struct=%zu (modeplane=%d) cell=%zu (cellsplit=%d) B  "
+            "leaves=%ld split-bits=%ld mode-bits=%ld%s\n",
+            cfg.split_bias, cfg.split_lookahead, struct_sz, (int)use_modeplane,
+            cell_sz, (int)use_cellsplit, total_leaves,
+            st.bstats.split_bits, st.bstats.mode_bits,
+            total_leaves ? "" : "  [pass --stats for leaf counts]");
+    }
+
     // Lever: drop the per-frame [u16 len] from the structure plane (frame
     // boundaries are implicit in the quadtree walk). Measured ~3-4 KB; NOT
     // shipped (would need a 9th header-flag bit / 16-bit flags). Re-check here.

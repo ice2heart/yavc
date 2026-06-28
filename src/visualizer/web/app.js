@@ -56,8 +56,21 @@ async function getFrame(i) {
   return d;
 }
 
+// Backing-store pixels per cell. A cell is a 2-wide x 4-tall sub-pixel block, so
+// it must render taller than wide (1:2) -- the old fixed 800x480 canvas was
+// exactly 10px wide x 20px tall per cell at 80x24. Hi-res (160x48) packs 4x the
+// cells, so halve the cell size there: the canvas stays the same ~800x480
+// footprint instead of ballooning to 1600x960, at the cost of smaller glyphs.
+const PX_PER_CELL_W = 10;
+const PX_PER_CELL_H = 20;
+
 async function main() {
   T = await (await fetch('/trace.json')).json();
+  const g = $('grid');
+  const hires = T.cols > 80;       // 160x48 grid -> render cells at half size
+  const scale = hires ? 0.5 : 1;
+  g.width  = T.cols * PX_PER_CELL_W * scale;
+  g.height = T.rows * PX_PER_CELL_H * scale;
   $('meta').textContent =
     `${T.cols}x${T.rows} @ ${T.fps}fps  lambda=${T.lambda}` +
     (T.shift ? `  shift=${T.shift}` : '') +

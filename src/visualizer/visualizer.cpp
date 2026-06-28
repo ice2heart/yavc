@@ -89,6 +89,8 @@ static void run_encode(const EncoderConfig &cfg, EncoderState &st, VizTrace &tr)
     bp.cols = cfg.cols; bp.rows = cfg.rows;
     bp.lambda = cfg.lambda; bp.block_stable = (long)cfg.block_stable;
     bp.shift_range = cfg.shift;
+    bp.split_lookahead = cfg.split_lookahead; // split-coarsening lever B (default 2);
+                                              // future_sub set per frame below
 
     long cell_pos = (long)st.cell_plane.size();
     long color_pos = (long)st.color_plane.size();
@@ -100,6 +102,17 @@ static void run_encode(const EncoderConfig &cfg, EncoderState &st, VizTrace &tr)
         std::vector<uint8_t> ideal = quantize(st.targets[f]);
         prev_snapshot = shown;
         bp.sub = st.targets[f].data();
+        // Split lookahead (lever B): mirror pass2_encode -- hand the coder the next
+        // split_lookahead frames' sub-pixel blocks so the captured tree matches the
+        // real encoder's. No-op when split_lookahead == 0.
+        std::vector<const uint8_t *> fut_sub;
+        if (cfg.split_lookahead > 0) {
+            for (int k = 1; k <= cfg.split_lookahead && f + (size_t)k < st.targets.size(); ++k)
+                fut_sub.push_back(st.targets[f + k].data());
+        }
+        bp.future_sub = fut_sub.empty() ? nullptr : fut_sub.data();
+        bp.future_ideal = nullptr;
+        bp.future_n = (int)fut_sub.size();
         const uint8_t *frame_color = cfg.color ? st.ctargets[f].data() : nullptr;
 
         VizFrame vf;

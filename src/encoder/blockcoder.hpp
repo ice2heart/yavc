@@ -24,6 +24,21 @@ struct BlockCoderParams {
     // SHIFT entirely (and the stream then carries no "moved" bit). Clamped to
     // TVID_SHIFT_MAX. When > 0, the encoder emits one "moved" bit per SKIP leaf.
     int    shift_range;
+    // EXPERIMENTAL split-coarsening levers (default 0 = exact current behavior).
+    // Both bias the quadtree toward bigger leaves; neither changes the format or
+    // decoder -- the emitted tree is always legal. Measured behind -DTVID_PROBE.
+    //  split_bias: a per-split surcharge (same lambda*bits units as a split flag)
+    //    added to the "split into 4" option, modeling the post-entropy structure/
+    //    mode-tag cost the flat-lambda objective omits. Higher -> coarser tree.
+    //  split_lookahead + future_*: when > 0, a SKIP leaf that would also SKIP for
+    //    the next N future frames earns a distortion credit (per stable frame), so
+    //    a temporally stable partition stays whole and its structure plane repeats.
+    //    future_sub[k] / future_ideal[k] point at frame f+1+k (k in [0,future_n)).
+    long   split_bias = 0;
+    int    split_lookahead = 0;
+    const uint8_t *const *future_sub = nullptr;   // next frames' sub-pixel blocks
+    const uint8_t *const *future_ideal = nullptr; // next frames' ideal cells
+    int    future_n = 0;                          // how many future frames provided
     // Per-cell 2x4 sub-pixel luma blocks (cols*rows*TVID_MONO_SUBN) the RD search
     // scores cells against. Set per frame by the caller. (A non-null `sub` arg to
     // the encode functions overrides this; both are the same buffer in practice.)

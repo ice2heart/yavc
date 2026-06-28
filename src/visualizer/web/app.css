@@ -26,6 +26,10 @@ main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
 #canvas-wrap {
   background: #0c0d10; border: 1px solid #2a2e36; border-radius: 6px;
   padding: 8px; display: inline-block;
+  /* The canvas backing store grows with the grid (hi-res -> 1600x960); scroll
+     within a bounded viewport rather than blow out the page. The canvas keeps
+     its intrinsic pixel size (no CSS width/height) so pixelated stays crisp. */
+  max-width: 100%; max-height: calc(100vh - 160px); overflow: auto;
 }
 canvas { display: block; image-rendering: pixelated; }
 #controls { margin-top: 12px; }

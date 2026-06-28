@@ -25,6 +25,18 @@ struct EncoderConfig {
     int shift = 0;            // SHIFT motion search radius in cells (0 = off)
     int block_stable = 2000;  // block-level SKIP hysteresis (distortion credit)
     int lambda = 6;           // RD weight: cost = lambda*bits + distortion
+    // Split-coarsening levers. Both bias the quadtree toward bigger leaves; no
+    // format/decoder change (the emitted tree is always a legal quadtree).
+    //   split_bias (lever A): DEAD -- measured a net regression post-entropy, kept
+    //     at default 0 (exact current behavior) as a probe knob only. See
+    //     doc/abandoned-levers.md.
+    //   split_lookahead (lever B): SHIPPED, default 2. A SKIP leaf that would also
+    //     SKIP for the next N frames earns a stability credit, so a temporally
+    //     stable partition stays whole and its structure plane repeats (cheaper
+    //     under the order-1 range coder). Measured -0.1..-1.4% on real clips, never
+    //     a regression. See doc/compression.md.
+    int split_bias = 0;       // --split-bias: per-split surcharge (lambda*bits units)
+    int split_lookahead = 2;  // --split-lookahead: # future frames granting SKIP credit
     bool compress = false;
     bool stats = false;       // --stats: structure-vs-literal byte accounting
     bool split = false;       // --split: per-plane entropy-coded body

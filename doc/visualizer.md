@@ -26,8 +26,23 @@ Keep `build-viz/` out of commits (like `build-probe/`).
 
 ## Run
 
-The visualizer reads the **same rgb24 stream** `tools/encode.sh` feeds the encoder
-(`(cols*2) x (rows*4)` per frame), so drive it with the same ffmpeg pipe:
+The easiest way is `tools/visualize.sh`, the sibling of `tools/encode.sh`: it
+takes the **same flags** (`--hi-res`, `--lambda`, `--color`, `--stable`, …) and
+builds the **same ffmpeg pipe**, but pipes into the visualizer instead of the
+encoder, so encode-time and inspect-time parameters stay in sync. It auto-builds
+the `visualizer` target if missing (first configure needs network for civetweb)
+and runs from the repo root so the webroot resolves:
+
+```sh
+tools/visualize.sh in.mp4 --hi-res --lambda 6 [--color]   # open the printed URL
+```
+
+Unlike `encode.sh` it takes no OUTPUT argument and does no audio handling (the
+visualizer ignores audio). Override the binary with `VISUALIZER=…` like
+`encode.sh`'s `ENCODER=…`.
+
+Under the hood it reads the **same rgb24 stream** `tools/encode.sh` feeds the
+encoder (`(cols*2) x (rows*4)` per frame); to drive it by hand:
 
 ```sh
 ffmpeg -i in.mp4 -vf "fps=10,scale=160:96" -pix_fmt rgb24 -f rawvideo - \
@@ -93,7 +108,7 @@ split/mode stages, cell on quantize/decode, all three on plane assembly), so you
 can watch a region's bytes accumulate stage by stage. The capture lives in the
 same `#if defined(TVID_VIZ)` hook in [blockcoder.cpp](../src/encoder/blockcoder.cpp),
 reading the bytes/bits back out of the serializer's own buffers.
-
+check
 ## Verification
 
 The visualizer's per-frame framebuffer must equal the player's decode — the same

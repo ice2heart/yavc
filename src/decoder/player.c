@@ -50,6 +50,13 @@ static int read_u8(FILE *fp) {
     return c;
 }
 
+/* TVID_NOWAIT=1: decode as fast as possible -- skip all inter-frame pacing (the
+ * backend timer AND the audio-clock wait) and don't open the real-time audio
+ * device at all (its ring would throttle the decode to ~1x). For headless
+ * test/throughput runs that just want every frame decoded ASAP; the run is silent
+ * and video races as fast as it decodes. Set once at startup (see main). */
+static int g_no_wait = 0;
+
 /* Audio track + playback pacing. The ADPCM payload is read once from the file
  * tail and kept *compressed* resident; blocks are self-contained, so the player
  * decodes them ONE AT A TIME on demand in audio_pump (into a small scratch buffer)
@@ -128,7 +135,13 @@ static int audio_load(audio_track *at, FILE *fp, const tvid_header *h) {
     at->decoded = 0;
     at->submitted = 0;
     at->rate = h->audio_rate;
-    if (audio_init(at->rate, h->audio_channels ? h->audio_channels : 1) == 0)
+    /* TVID_NOWAIT: a flat-out test decode must not throttle on the real-time audio
+     * device. The backend ring drains only at playback speed, so opening it would
+     * block audio_pump/sync_wait at ~1x even with frame pacing disabled. Skip
+     * audio_init entirely: at->active stays 0, the player runs silent and as fast
+     * as it can decode (the round-trip dump is video only anyway). */
+    if (!g_no_wait &&
+        audio_init(at->rate, h->audio_channels ? h->audio_channels : 1) == 0)
         at->active = 1;         /* else: video still plays, just silent */
     return 0;
 }
@@ -244,6 +257,7 @@ static void audio_dump_stdout(audio_track *at) {
  * played up to (frame_index / fps) seconds; otherwise fall back to the backend's
  * timer. Pumps audio while waiting so the queue never starves. */
 static void sync_wait(audio_track *at, uint32_t frame_index, int fps) {
+    if (g_no_wait) return;            /* TVID_NOWAIT: decode flat-out, no pacing */
     if (!at->active) { backend_wait_frame(fps); return; }
     long due = (long)((long long)frame_index * at->rate / (fps > 0 ? fps : 1));
     if (due > at->nsamples) due = at->nsamples;
@@ -492,6 +506,7 @@ static void seg_load(plane_seg *s, FILE *fp, const tvid_header *h,
 
 int main(int argc, char **argv) {
     if (argc < 2) die("usage: player <file.tvid>");
+    g_no_wait = getenv("TVID_NOWAIT") != NULL; /* decode flat-out for test runs */
     FILE *fp = fopen(argv[1], "rb");
     if (!fp) die("cannot open input file");
 

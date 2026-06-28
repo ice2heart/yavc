@@ -108,6 +108,28 @@ rescue an operator that is wrong for the byte. v4 ships **plain entropy** for ke
 format already auto-selects methods 0–3 per chunk, range coder included). *Still measurable behind
 `-DTVID_PROBE` as `probe[seg-kf]` in `write_split_segmented_output`.*
 
+## Split-bias — surcharge to force bigger quadtree leaves
+
+**What:** a per-split penalty (`--split-bias N`) added to the "subdivide into 4" option in
+`Tree::build`, modeling the post-entropy structure/mode-tag cost the flat-`lambda` objective
+omits, to bias the tree toward **bigger leaves**. The intuition: a bigger leaf removes split bits
+*and* the mode tags they spawn, which the range coder would otherwise have to code, so the
+per-frame RD optimum splits more finely than the post-entropy optimum.
+
+**Measured (entropy-coded whole-file vs `--split-bias 0`):** DEAD. Best case was a −0.12%/−0.06%
+wiggle (noise); larger bias regresses (**+2.75%** at bias 64). Both the structure plane *and* the
+cell plane grow.
+
+**Why dropped:** `Tree::build` is already an **exact** RD optimum, and the range coder already
+codes the split bits near-free (they are highly predictable order-1). Forcing coarser leaves
+trades those cheap split bits for **larger cell payloads** — the bytes a coarse leaf must spend to
+approximate detail it would otherwise have subdivided away. This is the same lesson as the
+"decorrelate before entropy" levers above, in a different guise: don't fight a decision the entropy
+back-end has already priced correctly. The companion lever that *did* ship from the same
+investigation was **`--split-lookahead`** (temporal-stability credit, not a coarseness surcharge);
+see [compression.md](compression.md). *Still measurable behind `-DTVID_PROBE` as the
+`probe[bigchunk]:` line (`--split-bias` field).*
+
 ## Glyph-as-shape template matching (single-color)
 
 **What:** pick the glyph whose ink pattern best matches the cell's sub-pixel luminance gradient,

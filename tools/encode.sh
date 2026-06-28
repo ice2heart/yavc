@@ -15,6 +15,11 @@
 #                   hurt low-motion content. Opt-in.
 #   --block-stable T  block-level temporal hysteresis: distortion credit that lets
 #                   a barely-changed quadtree block stay SKIP (kills block shimmer).
+#   --split-lookahead N  temporal coupling of the quadtree *shape*: a SKIP leaf that
+#                   would also SKIP for the next N frames stays whole, so the same
+#                   structure plane recurs and entropy-codes cheaper (default 2,
+#                   0=per-frame tree). Distinct from --lookahead (per-cell deadband).
+#                   Measured -0.03..-0.93% whole-file, never a regression.
 #   --lambda L      rate-distortion weight (default 24): higher spends more bytes
 #                   chasing detail, lower favors SKIP/SOLID.
 #   --quant Q       quantizer: nearest | joint | dither | bayer (default joint).
@@ -77,6 +82,11 @@ LOOKAHEAD=8         # peek N future frames to hold transient cell churn (0=off)
 SHIFT=0             # SHIFT motion-vector radius in cells (0=off; helps panning,
                     # hurts low-motion content because of a per-SKIP-leaf tax)
 BLOCK_STABLE=2000
+SPLIT_LOOKAHEAD=2   # quadtree-shape temporal coupling: a SKIP leaf that would also
+                   # SKIP for the next N frames stays whole so the structure plane
+                   # repeats and entropy-codes cheaper (0=per-frame tree). Matches the
+                   # encoder default; passed explicitly so it shows in --help and is
+                   # tunable. Distinct from --lookahead (per-cell deadband).
 LAMBDA=6            # cost = LAMBDA*bits + distortion; LOWER = more detail
 QUANT=mono          # v3 is always the sub-cell luma+glyph model (the old --quant
                     # color modes are retired); kept for the encoder's compat arg
@@ -103,6 +113,7 @@ while [ $# -gt 0 ]; do
     --lookahead)    LOOKAHEAD="$2"; shift 2 ;;
     --shift)        SHIFT="$2"; shift 2 ;;
     --block-stable) BLOCK_STABLE="$2"; shift 2 ;;
+    --split-lookahead) SPLIT_LOOKAHEAD="$2"; shift 2 ;;
     --lambda)       LAMBDA="$2"; shift 2 ;;
     --dither)       QUANT=dither; shift ;;
     --quant)        QUANT="$2"; shift 2 ;;
@@ -168,6 +179,7 @@ encode_at() {
     "${boost}scale=${sw}:${sh}:force_original_aspect_ratio=decrease,pad=${sw}:${sh}:(ow-iw)/2:(oh-ih)/2,format=rgb24" \
     -f rawvideo - | "$ENCODER" --fps "$fps" --stable "$STABLE" \
       --lookahead "$LOOKAHEAD" --shift "$SHIFT" --block-stable "$BLOCK_STABLE" \
+      --split-lookahead "$SPLIT_LOOKAHEAD" \
       --lambda "$lambda" $extra $AUDIO_ARGS $EXTRA_FWD --cols "$COLS" --rows "$ROWS" --out "$out"
 }
 

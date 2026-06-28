@@ -212,6 +212,18 @@ Probe the added cost with the `-DTVID_PROBE` build (`probe[color]:` line) — se
 - **`--lambda`** — the RD weight. Lower buys detail (bits cheap → RAW/PAL2); higher shrinks the
   file (bits expensive → SOLID/SKIP). `tools/encode.sh --fit-size` raises lambda to fit the budget,
   stepping fps 12→10→8 only as a last resort.
+- **`--split-lookahead N`** (default **2**) — temporal coupling for the **quadtree shape**. The RD
+  tree is built per-frame with no temporal coupling, so a leaf that is about to keep SKIPping for
+  several frames is still free to subdivide this frame on a momentary detail, churning the
+  structure plane. This knob grants a SKIP leaf a distortion credit for each of the next `N` frames
+  it would *also* SKIP, so a temporally stable region stays whole and the **same structure plane
+  recurs** — which the order-1 range coder codes almost for free. Counterintuitively the win is
+  *not* coarseness (leaf count barely moves, can even rise); it's the repeating partition. Measured
+  monotonic and never a regression: whole-file **−0.93%** (bif), **−0.06%** (bad), **−0.03%**
+  (video) at fps 10; the video-plane-only share is larger (bif −1.4%, structure plane
+  11,596→11,299 B). Saturates by `N`=2–4. Reads the already-resident future frames (`st.targets`),
+  so it costs no extra buffering. `0` restores the exact per-frame tree. (Distinct from
+  `--lookahead`, which is per-*cell* deadband hysteresis, not the tree.)
 
 ## Audio entropy coding (`--audio-entropy`, codec 2)
 
@@ -274,7 +286,8 @@ not built (gated on whether 6 kHz already covers the sweet spot).
 | Entropy-coded ADPCM audio (codec 2, `--audio-entropy`) | **shipped** (opt-in) — ~10–12% off total file bytes, lossless |
 | Lossy audio rate knob (`--audio-rate`) | **shipped** (encoder knob) |
 | Temporal hysteresis / lookahead / block-stable / lambda | **shipped** (encoder knobs) |
-| PAL4, field-split cells, order-1 *static* Huffman, glyph-as-shape, half-block sub-cell color, forward-reference frames, per-leaf cell predictor, drop-per-frame-length | **rejected** — see [abandoned-levers.md](abandoned-levers.md) |
+| **Split lookahead (`--split-lookahead`, default 2)** | **shipped** (encoder knob) — temporally-stable quadtree shape, −0.03…−0.93% whole-file, never a regression |
+| PAL4, field-split cells, order-1 *static* Huffman, glyph-as-shape, half-block sub-cell color, forward-reference frames, per-leaf cell predictor, drop-per-frame-length, **split-bias (bigger-leaf surcharge)** | **rejected** — see [abandoned-levers.md](abandoned-levers.md) |
 
 ## The round-trip gate
 
