@@ -227,6 +227,10 @@ Probe the added cost with the `-DTVID_PROBE` build (`probe[color]:` line) — se
 
 ## Audio entropy coding (`--audio-entropy`, codec 2)
 
+> The full audio codec history, the measured-but-unwired step-index context coder
+> (codec 3), and the audio lever status table live in
+> [audiocodec-evo.md](audiocodec-evo.md). This section is the codec-2 summary.
+
 The audio tail is ~90% of a shipped file's bytes, and v3 audio was plain 4-bit
 IMA-ADPCM with **no entropy stage** (measured 4.01 bits/sample). `gzip`/`xz`
 recover ~10–16% from it — all the "zip headroom" the rest of the format had

@@ -23,6 +23,9 @@
 #include <vector>
 extern "C" {
 #include "range.h"
+#ifdef TVID_PROBE
+#include "adpcm_ctx_probe.hpp"
+#endif
 }
 #endif
 
@@ -60,6 +63,10 @@ int main(int argc, char **argv) {
                 std::fprintf(stderr, "probe[adpcm-ent]:   K=%-4d grouped=%8ld (%.1f%%)\n",
                     K, sz, 100.0 * sz / raw);
             }
+            // probe[adpcm-ctx]: the same nibble stream, but entropy-coded with a
+            // model keyed on the ADPCM step index (free decoder context) instead
+            // of the generic order-1 byte coder. Baseline = whole-stream above (wc).
+            tvid_probe::measure_adpcm_ctx(st.audio_blob, st.audio_samples);
         }
 #endif
         // --audio-entropy: replace the raw ADPCM tail with the entropy-coded one
