@@ -50,7 +50,7 @@ fi
 # color and hi-res variants, which are the large ones that OOM on DOS under v3;
 # plain mono stays v3 (small enough to stay whole-resident).
 VARIANT_NAMES=(mono       mono-hires        color           color-hires)
-VARIANT_FLAGS=(""         "--hi-res --seg"  "--color --seg" "--color --hi-res --seg")
+VARIANT_FLAGS=("--mono-boost"         "--hi-res --seg --mono-boost"  "--color --seg" "--color --hi-res --seg")
 
 # --- collect sources -----------------------------------------------------------
 shopt -s nullglob nocaseglob

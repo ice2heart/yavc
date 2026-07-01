@@ -35,7 +35,13 @@ work), and Opus/AAC violate the integer-only asymmetry rule. So the only remaini
 *lossless-vs-ADPCM* lever is to entropy-code the existing nibbles — which is what
 codecs 2 and 3 do, at no quality cost.
 
-## codec 2 — ADPCM + grouped order-1 range coder (shipped, `--audio-entropy`)
+## codec 2 — ADPCM + grouped order-1 range coder (shipped; now subsumed by codec 3)
+
+> Codec 3 (below) is a strict superset — its per-chunk auto-select still includes
+> codec 2's order-1-byte method — and is the shipped default. Codec 2 remains a
+> valid on-disk codec (old files, and any chunk where method 3 beats method 4), and
+> the player still decodes an `audio_codec == 2` tail. This section documents the
+> back-end codec 3 builds on.
 
 `audio_codec == 2` (`TVID_AUDIO_IMA_ADPCM_ENT`) keeps the **exact same ADPCM blocks**
 but wraps each group of `TVID_AUDIO_ENT_GROUP` (256) blocks in a self-describing
@@ -74,12 +80,25 @@ context selector**, never a pre-transform (see compression.md and the
 [mono-cell-entropy-gap] note). The step index is the obvious selector — and crucially
 it is **free at decode**.
 
-## codec 3 (proposed) — ADPCM + step-index context nibble coder (MEASURED WIN, not yet wired)
+## codec 3 — ADPCM + step-index context nibble coder (SHIPPED, the default entropy tail)
 
-> **Naming note:** [compression.md](compression.md) §"Lossy audio size knob" also
-> pencils in `audio_codec == 3` for a hypothetical *3-bit IMA lossy* variant. That
-> one was never built. Pick the next free `audio_codec` id when wiring this; the two
-> are independent (this one is **lossless** vs codec 1, the 3-bit one is lossy).
+> **Status: shipped and default.** `--audio-entropy` is now ON by default and
+> produces codec 3 (`TVID_AUDIO_IMA_ADPCM_CTX`); `--no-audio-entropy` opts back to
+> the plain codec-1 raw tail. The coder is split enc/dec (`range_ctx_enc.cpp` /
+> `range_ctx_dec.c`, model + context selector shared bit-exactly via
+> `range_ctx_internal.h`), wired as per-chunk **method 4** inside the codec-2
+> grouped-chunk wrapper (`ctx_wrap_adpcm_k` in `enc_stages.cpp`; decoded by
+> `audio_fill_group` in `player.c`). Each chunk auto-selects among method 0
+> (stored), 3 (order-1 byte range), and 4 (context nibble), so codec 3 is a strict
+> superset of codec 2 and never regresses. Round-trip pinned by the
+> `audio_ctx_roundtrip` ctest (bit-identical ADPCM reconstruction across group
+> restarts). The measurement below is what justified shipping it.
+
+> **Naming note (resolved):** an earlier draft of [compression.md](compression.md)
+> §"Lossy audio size knob" pencilled `audio_codec == 3` for a hypothetical *3-bit
+> IMA lossy* variant. That one was never built, and `audio_codec == 3` is now taken
+> by this **lossless** context coder (`TVID_AUDIO_IMA_ADPCM_CTX`). If the 3-bit
+> lossy variant is ever built it takes the next free id (4).
 
 ### The lever
 

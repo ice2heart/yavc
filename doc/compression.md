@@ -225,11 +225,13 @@ Probe the added cost with the `-DTVID_PROBE` build (`probe[color]:` line) — se
   so it costs no extra buffering. `0` restores the exact per-frame tree. (Distinct from
   `--lookahead`, which is per-*cell* deadband hysteresis, not the tree.)
 
-## Audio entropy coding (`--audio-entropy`, codec 2)
+## Audio entropy coding (codec 3, default; codec 2 back-end below)
 
-> The full audio codec history, the measured-but-unwired step-index context coder
-> (codec 3), and the audio lever status table live in
-> [audiocodec-evo.md](audiocodec-evo.md). This section is the codec-2 summary.
+> The full audio codec history, the shipped step-index context coder (codec 3, now
+> the **default** entropy tail), and the audio lever status table live in
+> [audiocodec-evo.md](audiocodec-evo.md). This section summarizes codec 2, the
+> order-1-byte back-end codec 3 auto-selects between and builds on. Entropy coding
+> is **on by default** now (`--no-audio-entropy` opts back to the raw codec-1 tail).
 
 The audio tail is ~90% of a shipped file's bytes, and v3 audio was plain 4-bit
 IMA-ADPCM with **no entropy stage** (measured 4.01 bits/sample). `gzip`/`xz`
@@ -269,9 +271,10 @@ Orthogonal to codec 2: lowering the sample rate scales the ADPCM size linearly
 and is the *largest* audio lever, at a quality cost. `--audio-rate` is already
 plumbed end-to-end (ffmpeg `-ar` → sub-header). Estimated with entropy stacked:
 6 kHz ≈ 64% of audio, 4 kHz ≈ 43%. Ship default stays 8 kHz lossless; 6 kHz is
-the first size step for an over-budget clip. A 3-bit IMA variant
-(`audio_codec == 3`) would be the next lossy step but needs a new decode path —
-not built (gated on whether 6 kHz already covers the sweet spot).
+the first size step for an over-budget clip. A 3-bit IMA lossy variant would be the
+next lossy step but needs a new decode path — not built (gated on whether 6 kHz
+already covers the sweet spot). (`audio_codec == 3` is now the lossless context
+coder; a 3-bit variant would take the next free id.)
 
 ## Shipped vs experimental
 

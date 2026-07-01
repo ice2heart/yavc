@@ -163,11 +163,14 @@ untouched — the player seeks to `filesize − audio_bytes` to find it.
 The codec is **4-bit IMA/DVI ADPCM** (0.5 byte/sample, integer-only table-driven decode — the
 classic Sound Blaster choice, satisfying the decoder-asymmetry rule). ~8 kHz mono fits a
 3-minute song in well under a megabyte (~860 KB). The `audio_codec` sub-header byte selects:
-**1** = raw ADPCM blocks (above); **2** = the same blocks **entropy-coded**
-(`--audio-entropy`, codec 2) — each group of `TVID_AUDIO_ENT_GROUP` blocks is range-coded back
-to the exact same ADPCM bytes, ~10–12% smaller off the audio (which is ~90% of file bytes) with
-no quality change and full DOS decodability (see [compression.md](compression.md)); **3** is
-reserved for a 3-bit IMA variant, not built. The lossy size knob is `--audio-rate` (orthogonal
+**1** = raw ADPCM blocks (above); **2** = the same blocks **entropy-coded** — each group of
+`TVID_AUDIO_ENT_GROUP` blocks is range-coded back to the exact same ADPCM bytes; **3** = the
+same grouped chunks, but a chunk may use a **step-index-context nibble coder** that beats the
+codec-2 byte coder by ~2–3% (auto-selected per chunk, so codec 3 never regresses vs codec 2).
+Codec 3 is the **default** (`--no-audio-entropy` reverts to codec 1); all are lossless w.r.t.
+codec 1 (decoded PCM bit-identical) and fully DOS-decodable, ~10–14% smaller off the audio
+(which is ~90% of file bytes) with no quality change (see [compression.md](compression.md) and
+[audiocodec-evo.md](audiocodec-evo.md)). The lossy size knob is `--audio-rate` (orthogonal
 to the codec field). Stream framing is **self-contained blocks**
 ([adpcm.h](../src/common/adpcm.h)): each block carries its own `[s16 predictor][u8 step_index]
 [u8 reserved]` then `ADPCM_BLOCK_SAMPLES−1` nibbles, with **no cross-block state**, so a DOS

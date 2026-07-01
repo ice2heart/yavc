@@ -46,8 +46,11 @@ struct EncoderConfig {
     std::string audio_pcm_path; // raw s16le mono PCM to embed
     int audio_rate = 8000;
     bool has_audio = false;
-    bool audio_entropy = false; // --audio-entropy: range-code the ADPCM nibbles
-                                // (codec 2). Lossless vs codec 1, ~10-16% smaller.
+    bool audio_entropy = true;  // entropy-code the ADPCM tail (codec 3). ON by
+                                // default: lossless vs codec 1 and never regresses
+                                // (each chunk auto-selects, worst case stores raw),
+                                // ~10-16% smaller. --no-audio-entropy opts out to
+                                // the plain codec-1 raw ADPCM tail.
 };
 
 // Big working buffers + accumulators, owned across the pipeline stages.
@@ -81,7 +84,7 @@ struct EncoderState {
     // audio (encoded up front so audio_bytes is known before the header).
     std::vector<uint8_t> audio_blob;
     long audio_samples = 0;
-    int  audio_codec = TVID_AUDIO_IMA_ADPCM; // 1 = raw ADPCM, 2 = entropy-coded
+    int  audio_codec = TVID_AUDIO_IMA_ADPCM; // 1 = raw, 2 = entropy, 3 = ctx-nibble
 
 #ifdef TVID_PROBE
     // Probe accumulators carried from pass 2 into the split-output writer.
@@ -98,6 +101,9 @@ std::vector<uint8_t> entropy_wrap_adpcm(const std::vector<uint8_t> &blob,
                                         long samples);
 std::vector<uint8_t> entropy_wrap_adpcm_k(const std::vector<uint8_t> &blob,
                                           long samples, int group);
+std::vector<uint8_t> ctx_wrap_adpcm(const std::vector<uint8_t> &blob, long samples);
+std::vector<uint8_t> ctx_wrap_adpcm_k(const std::vector<uint8_t> &blob,
+                                      long samples, int group);
 void pass1a_read_frames(const EncoderConfig &cfg, EncoderState &st);
 void pass1b_hysteresis(const EncoderConfig &cfg, EncoderState &st);
 void pass2_encode(const EncoderConfig &cfg, EncoderState &st);

@@ -29,12 +29,14 @@ set(TVID_COMMON_DEC
   src/common/codec.c
   src/common/lzss_dec.c
   src/common/range_dec.c
+  src/common/range_ctx_dec.c
   src/common/entropy_dec.c
   src/common/huffman_dec.c
   src/common/adpcm_dec.c)
 set(TVID_ENC_CODEC
   src/encoder/lzss_enc.cpp
   src/encoder/range_enc.cpp
+  src/encoder/range_ctx_enc.cpp
   src/encoder/entropy_enc.cpp
   src/encoder/huffman_enc.cpp
   src/encoder/adpcm_enc.cpp)
@@ -107,6 +109,15 @@ add_executable(audio_entropy_test
   src/common/range_dec.c src/encoder/range_enc.cpp)
 target_link_libraries(audio_entropy_test m)
 add_test(NAME audio_entropy_roundtrip COMMAND audio_entropy_test)
+
+# Codec-3 audio: the step-index-context nibble coder (method 4) must reconstruct
+# the exact ADPCM bytes (lossless vs codec 1), across the K=256 group restarts.
+add_executable(audio_ctx_test
+  tests/audio_ctx_test.c
+  src/common/adpcm_dec.c src/encoder/adpcm_enc.cpp
+  src/common/range_ctx_dec.c src/encoder/range_ctx_enc.cpp)
+target_link_libraries(audio_ctx_test m)
+add_test(NAME audio_ctx_roundtrip COMMAND audio_ctx_test)
 
 # Golden-byte test: pins the EXACT compressed output of each entropy method, so a
 # refactor that still round-trips but changes the bytestream is caught.

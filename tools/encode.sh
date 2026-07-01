@@ -58,9 +58,12 @@
 #                   *size* knob: audio is ~90% of file bytes and ADPCM size scales
 #                   linearly with rate (6000 ~= 64%, 4000 ~= 43% vs 8000), at a
 #                   quality cost. Lower it to fit an over-budget clip.
-#   --audio-entropy range-code the ADPCM nibbles (audio codec 2). Lossless vs the
-#                   default codec 1 (decoded PCM is bit-identical), ~10-12% off the
-#                   whole file, DOS-decodable. Forwarded verbatim to the encoder.
+#   --no-audio-entropy  ship the plain codec-1 raw ADPCM tail. By DEFAULT the audio
+#                   is entropy-coded (audio codec 3: step-index-context nibble coding
+#                   with an order-1-byte range fallback, auto-selected per chunk).
+#                   That is lossless vs codec 1 (decoded PCM is bit-identical),
+#                   ~10-14% off the whole file, never regresses, and DOS-decodable.
+#                   Use this only to A/B the raw tail. Forwarded to the encoder.
 #   --no-audio      do not embed audio (video only; the previous behavior). Also
 #                   used automatically when the source has no audio track.
 set -euo pipefail

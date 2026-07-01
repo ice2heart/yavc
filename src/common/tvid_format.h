@@ -205,9 +205,23 @@ extern "C" {
  * chunk back to the EXACT codec-1 ADPCM block bytes, then runs the unchanged
  * adpcm_decode_block - so decoded PCM is bit-identical to codec 1. Per-chunk
  * restart points preserve the DOS block-streaming / DMA self-heal property.
- * A strict codec-1-only player rejects audio_codec 2 and plays silent. */
+ * A strict codec-1-only player rejects audio_codec 2 and plays silent.
+ *
+ * Codec 3: same grouped-chunk shape and K=256 grouping as codec 2, but a chunk may
+ * also use method 4 = step-index-context nibble coding (range_ctx.h). Instead of
+ * range-coding the chunk *bytes*, method 4 walks the ADPCM blocks and codes each
+ * 4-bit nibble with a model selected by the running step index and previous nibble
+ * -- a context the decoder reconstructs for free (adpcm_decode_block already tracks
+ * the index). It decodes back to the EXACT codec-1 ADPCM block bytes, so PCM stays
+ * bit-identical to codec 1; ~2-3% smaller off the audio than codec 2 at no quality
+ * cost, and the decode path is LIGHTER (16-symbol / 192-context vs 256/256). A
+ * codec-3 chunk auto-selects per group among method 0 (stored), 3 (order-1 byte
+ * range), and 4 (context nibble), so it never regresses vs codec 2. A player that
+ * only knows codecs 1/2 rejects audio_codec 3 and plays silent. See
+ * doc/audiocodec-evo.md "codec 3". */
 #define TVID_AUDIO_IMA_ADPCM 1
 #define TVID_AUDIO_IMA_ADPCM_ENT 2
+#define TVID_AUDIO_IMA_ADPCM_CTX 3
 /* ADPCM blocks grouped per entropy chunk under codec 2. The adaptive range coder
  * needs a long warmup, so per-reset tax is steep at small group sizes (probe
  * sweep on vi/sat: K=4 -> ~96%, K=64 -> ~92%, K=256 -> ~89%, K=1024 -> ~87% ==

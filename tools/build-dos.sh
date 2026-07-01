@@ -51,6 +51,7 @@ SRC="
   $ROOT/src/common/entropy_dec.c
   $ROOT/src/common/huffman_dec.c
   $ROOT/src/common/range_dec.c
+  $ROOT/src/common/range_ctx_dec.c
   $ROOT/src/common/adpcm_dec.c
 "
 

@@ -42,6 +42,7 @@ set(SRC
   "${SRC_ROOT}/src/common/entropy_dec.c"
   "${SRC_ROOT}/src/common/huffman_dec.c"
   "${SRC_ROOT}/src/common/range_dec.c"
+  "${SRC_ROOT}/src/common/range_ctx_dec.c"
   "${SRC_ROOT}/src/common/adpcm_dec.c")
 
 execute_process(

@@ -70,17 +70,21 @@ int main(int argc, char **argv) {
         }
 #endif
         // --audio-entropy: replace the raw ADPCM tail with the entropy-coded one
-        // (codec 2). Lossless vs codec 1; decoder range-decodes each chunk back to
-        // identical ADPCM bytes before adpcm_decode_block.
+        // (codec 3). Lossless vs codec 1; the decoder decompresses each chunk back
+        // to identical ADPCM bytes before adpcm_decode_block. Codec 3 auto-selects
+        // per chunk among stored / order-1-byte range (codec 2's method 3) / the
+        // step-index-context nibble coder (method 4), so it is a strict superset of
+        // codec 2 -- it never regresses and wins ~2-3% off the audio where the
+        // context coder fires. See doc/audiocodec-evo.md.
         if (cfg.audio_entropy) {
             std::vector<uint8_t> ent =
-                entropy_wrap_adpcm(st.audio_blob, st.audio_samples);
+                ctx_wrap_adpcm(st.audio_blob, st.audio_samples);
             std::fprintf(stderr,
                 "encoder: audio entropy-coded %zu B -> %zu B (%.1f%%)\n",
                 st.audio_blob.size(), ent.size(),
                 100.0 * ent.size() / st.audio_blob.size());
             st.audio_blob = std::move(ent);
-            st.audio_codec = TVID_AUDIO_IMA_ADPCM_ENT;
+            st.audio_codec = TVID_AUDIO_IMA_ADPCM_CTX;
         }
     }
 

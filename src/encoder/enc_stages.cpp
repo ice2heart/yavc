@@ -24,6 +24,7 @@ extern "C" {
 #include "mode_rle.h"
 #include "ramp.h"
 #include "range.h"
+#include "range_ctx.h"
 #include "tvid_format.h"
 #include "xterm256.h"
 }
@@ -186,6 +187,55 @@ std::vector<uint8_t> entropy_wrap_adpcm(const std::vector<uint8_t> &blob,
     return entropy_wrap_adpcm_k(blob, samples, TVID_AUDIO_ENT_GROUP);
 }
 
+// Wrap a raw IMA-ADPCM blob into the codec-3 entropy tail: the SAME grouped-chunk
+// shape as codec 2 (one chunk per group of `group` blocks, [u8 method][u32 adpcm_len]
+// [u32 payload_len][payload]), but each chunk auto-selects among method 0 (stored),
+// 3 (generic order-1 byte range, range.h), and 4 (step-index-context nibble coding,
+// range_ctx.h). Method 4 is the codec-3 lever: it codes the ADPCM nibbles keyed on
+// the running step index + previous nibble -- a context the decoder rebuilds for
+// free -- and decompresses back to the EXACT codec-1 ADPCM bytes. Keeping method 3
+// as a candidate means codec 3 is a strict superset of codec 2: it never regresses
+// per chunk. `samples` is the PCM sample count. See doc/audiocodec-evo.md "codec 3".
+std::vector<uint8_t> ctx_wrap_adpcm_k(const std::vector<uint8_t> &blob,
+                                      long samples, int group) {
+    std::vector<uint8_t> out;
+    size_t ip = 0;          // cursor into the raw ADPCM blob
+    long rem = samples;     // PCM samples still to account for
+    while (rem > 0 && ip < blob.size()) {
+        // Accumulate up to `group` whole blocks into one chunk, tracking the chunk's
+        // own PCM sample count (method 4 needs it to walk the block boundaries).
+        size_t grp_start = ip;
+        long grp_samples = 0;
+        for (int b = 0; b < group && rem > 0 && ip < blob.size(); ++b) {
+            int n = rem > ADPCM_BLOCK_SAMPLES ? ADPCM_BLOCK_SAMPLES : (int)rem;
+            long bb = adpcm_block_bytes(n);
+            if (bb < 0 || ip + (size_t)bb > blob.size()) enc_die("adpcm blob truncated");
+            ip += (size_t)bb;
+            rem -= n;
+            grp_samples += n;
+        }
+        const uint8_t *src = blob.data() + grp_start;
+        long glen = (long)(ip - grp_start);
+        std::vector<uint8_t> rc(glen + glen / 16 + 1024);
+        long rcc = range_compress(src, glen, rc.data(), (long)rc.size());
+        std::vector<uint8_t> cx(glen + glen / 16 + 1024);
+        long cxc = range_ctx_compress_adpcm(src, glen, grp_samples, cx.data(),
+                                            (long)cx.size());
+        int method = 0; long plen = glen; const uint8_t *psrc = src;
+        if (rcc > 0 && rcc < plen) { method = 3; plen = rcc; psrc = rc.data(); }
+        if (cxc > 0 && cxc < plen) { method = 4; plen = cxc; psrc = cx.data(); }
+        out.push_back((uint8_t)method);
+        put_u32le(out, (uint32_t)glen);
+        put_u32le(out, (uint32_t)plen);
+        out.insert(out.end(), psrc, psrc + plen);
+    }
+    return out;
+}
+
+std::vector<uint8_t> ctx_wrap_adpcm(const std::vector<uint8_t> &blob, long samples) {
+    return ctx_wrap_adpcm_k(blob, samples, TVID_AUDIO_ENT_GROUP);
+}
+
 EncoderConfig parse_args(int argc, char **argv) {
     EncoderConfig cfg;
     cfg.cols = TVID_COLS;
@@ -225,7 +275,8 @@ EncoderConfig parse_args(int argc, char **argv) {
         }
         else if (a == "--audio-pcm") cfg.audio_pcm_path = next();
         else if (a == "--audio-rate") cfg.audio_rate = std::atoi(next());
-        else if (a == "--audio-entropy") cfg.audio_entropy = true;
+        else if (a == "--audio-entropy") cfg.audio_entropy = true; // default; kept for compat
+        else if (a == "--no-audio-entropy") cfg.audio_entropy = false;
         else enc_die(("unknown arg: " + a).c_str());
     }
     // The color plane lives only in the split body (per-plane auto-select); it has
