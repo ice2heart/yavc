@@ -74,6 +74,76 @@ as method 3 (see [compression.md](compression.md)), making this static-table app
 background cell matches as one byte combined; split, neither field repeats as cleanly. Same shape
 as every "decorrelate before entropy" failure.
 
+## Per-sub-pixel luma cell (drop the glyph, store 8 lumas per cell)
+
+**What:** replace the `[luma:2|glyph:6]` cell byte with **8 independent sub-pixel luma values**
+(one per 2×4 Braille sub-pixel), so a cell carries real per-dot grayscale instead of a shared
+level × one of 64 binary ink shapes. Motivated by wanting finer fidelity on the DOS Mode 13h
+graphics renderer (the only target that can show per-dot gray; an ANSI Braille glyph paints all
+lit dots one color).
+
+**Measured (synthetic, through the real entropy back-end — `measure_plane_size`, the shipped
+lzss/huffman/no-LZ-huffman/order-1-range candidate set — off the post-hysteresis `st.targets`
+sub-luma blocks; whole clips, iso-quality by reporting mean per-sub-pixel SSE alongside coded
+bytes):**
+
+| representation | bad.webm coded (SSE) | video.webm coded (SSE) |
+|---|---|---|
+| **glyph (shipped)** | **399 KB (140)** | **834 KB (528)** |
+| 1 bit/sub-pixel | 266 KB (234) — cheaper but *worse* quality | 469 KB (3343) |
+| 2 bit/sub-pixel | 754 KB (50) +89% | 1744 KB (421) +109% |
+| 3 bit/sub-pixel | 1241 KB (11) +211% | 3662 KB (84) +339% |
+| 2-endpoint (min/max + 1 sel bit/subpx, 2 B/cell) | 1488 KB (81) +273% | 2629 KB (100) +215% |
+
+Also tried on the same quantized values, one byte per sub-luma so runs survive: **byte-run RLE**,
+**per-cell-mean normalization** (residual centered on 0), and **per-position deinterleave** (all
+sub-pixel-0 bytes together, etc.). None crossed the frontier — RLE helped the packed plane a
+little (bad 2-bit 1078→919 KB) but stayed +130%; deinterleave made it *worse* (+246…+540%);
+normalization was ≈flat. Full sweep is reproducible by re-adding the `probe[v5cell]` block (it was
+a go/no-go probe, not kept in tree).
+
+**Why dropped:** the 6-bit glyph is effectively a **learned vector-quantization codebook** — the
+64 patterns are the most-common real sub-pixel shapes, so 6 bits + a shared level reconstruct the
+cell almost as well as 8 independent lumas at 1/8 the raw size. The glyph cell sits **on the
+rate–distortion frontier**; every per-sub-pixel representation is strictly behind it (1.3–3.7×
+larger at equal quality, or worse quality when cheaper). Rearranging the same 8 luma values (RLE /
+normalize / deinterleave) cannot recover information the codebook already captured — the same
+"decorrelate/rearrange before entropy can't beat a good representation" lesson as field-split and
+the left/up predictor below. Per-sub-pixel luma *does* win on DOS fidelity (3-bit is near
+lossless) but that is a quality-for-size trade that breaks the floppy budget, not compression.
+
+## Motion compensation on this footage (SHIFT + MV prediction)
+
+**What:** the SHIFT motion sub-variant (opt-in, `--shift`), and on top of it a motion-vector
+**predictor** — code each moved leaf's `(dx,dy)` as a residual against the componentwise median
+of its causal-neighbor MVs (left / up / up-left cells), H.264-MVp style, instead of the shipped
+absolute (biased) coding.
+
+**Measured (all six `videos/` clips, fps 10, `--stable 32 --lookahead 8 --block-stable 2000
+--split-lookahead 2 --lambda 6`):**
+
+| clip | no-shift → `--shift 7` | MV-prediction Δ (of the MV-component bytes) |
+|---|---|---|
+| bad | 400 KB → 464 KB (**+16%**) | +0.1% |
+| video | 595 KB → 776 KB (**+30%**) | +0.2% |
+| bif | 802 KB → 965 KB (**+20%**) | +0.9% |
+| vi | 183 KB → 293 KB (**+60%**) | −0.1% |
+| sat | 135 KB → 216 KB (**+60%**) | +0.4% |
+| metallica | 694 KB → 1000 KB (**+44%**) | +0.4% |
+
+**Why dropped, two independent reasons:** (1) **SHIFT itself loses 16–60%** on every clip — the
+"moved" bit is spent on *every* SKIP leaf, and SKIP dominates (1–2.8 M leaves per clip), so the
+moved-bit tax on the SKIP majority dwarfs any copy savings on the handful of moved leaves. This is
+exactly why SHIFT ships off-by-default. (2) **MV prediction is neutral (±1%)** and the MV component
+bytes are only ~1–2% of the file to begin with (5–16 KB), so even a *perfect* predictor saves <1%
+whole-file — and only on clips where SHIFT is already a 16–60% regression. Moved leaves are sparse
+and spatially scattered (~4–8 per frame), so a leaf's neighbors are almost always non-moving
+(predictor ≈ 0 ⇒ residual ≈ absolute) — there is no coherent-pan structure for the predictor to
+exploit. Block motion compensation simply does not beat the SKIP + order-1-range baseline on this
+sparse-motion content; the shipped glyph codec is already near the rate–distortion frontier for it.
+Sub-pixel SHIFT would only refine the same sparse moved leaves (and cannot touch the moved-bit tax),
+so it was not built. *Measurable behind `-DTVID_PROBE` as `probe[mvpred]`.*
+
 ## Per-leaf cell-byte decorrelation (left/up predictor)
 
 **What:** within each RAW leaf, store `cell − left` (or `− up`) so residuals cluster near zero.
@@ -194,6 +264,20 @@ quality.
 two small tables; they need float/MDCT/large state. They violate the decoder
 asymmetry rule that governs the whole project (the decoder ships on the floppy
 and runs on a 1980s PC). Out of scope by construction, not by measurement.
+
+## In-loop deblocking / sample-adaptive-offset filter (HEVC/VVC-style)
+
+**What:** a post-decode smoothing pass — the deblocking + sample-adaptive-offset (SAO) in-loop
+filters that H.265/HEVC and H.266/VVC apply to hide block-boundary artifacts (surveyed in
+[compression_reserch.md](compression_reserch.md) §3.2.5). Runs on the reconstructed frame to raise
+perceptual quality at a given bitrate.
+
+**Why dropped (not measured — out of scope by construction):** it is a **quality-only, decoder-side**
+tool. It does not shrink the file — it *adds* per-pixel decode work to make an already-decoded frame
+look better. Under the project's decoder asymmetry rule (O(cells), branch-light, integer-only, ships
+on the floppy and runs on a 1980s PC) a filter that spends decode cycles for zero size win is
+categorically out — the same reason the half-block / xterm-256 quality levers were rejected. Noted
+here only so the paper's mention doesn't get re-litigated as a compression lever.
 
 ## Higher-order / affine extensions (noted, not pursued)
 
